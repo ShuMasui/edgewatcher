@@ -1,6 +1,6 @@
 # EdgeWatcher 概要設計
 
-最終更新: 2026-08-20
+最終更新: 2026-08-22
 ステータス: 設計中(基本方針確定、詳細設計は各コンポーネントごとに別途詰める)
 
 ## 1. プロジェクトの目的
@@ -22,25 +22,26 @@ EdgeWatcherは3つのコンポーネントで構成される。
 [EdgeWatcher Android App (Kotlin)]
    │ 画像+位置情報を定期送信 (Foreground Service)
    ▼
-[API Gateway (HTTP API)] ── [Lambda Authorizer] (Cognito JWT検証 + DynamoDBで端末生存確認)
+[API Gateway (HTTP API)] ── [Lambda Authorizer] (DynamoDBで端末セッション検証 + 生存確認)
    │
    ▼
-[Lambda (Go)] ─┬─> [S3: 画像バケット] (30日でライフサイクル削除)
+[Lambda (Go)] ─┬─> [S3: 画像バケット] (一定期間でライフサイクル削除 / APP-03)
                └─> [DynamoDB: シングルテーブル]
 
 [EdgeWatcher Web App (React/Vite SPA)]
-   │ S3(静的ホスティング) + CloudFront + ACM + Route53
+   │ S3(非公開) + CloudFront(OAC) + ACM + Route53
    ▼
-[API Gateway] → [Lambda (Go)] → DynamoDB / S3(署名付きURLで画像取得)
+[API Gateway] ── [JWT Authorizer] (Cognito Web Pool)
+   → [Lambda (Go)] → DynamoDB / S3(署名付きURLで画像取得)
 
 [Cognito]
-  - Web User Pool (Webユーザーのサインアップ/ログイン)
-  - Device User Pool (端末のIoT的な認証、パスワードレス)
+  - Web User Pool のみ (Google SSOによるログイン)
+  - 端末の認証はCognitoを使わず、自前のデバイス資格情報 + Lambda Authorizerで行う
 ```
 
 ### 使用AWSリソース
 
-Cognito(×2 User Pool)、API Gateway(HTTP API)、Lambda(Go)、Lambda Authorizer、DynamoDB(シングルテーブル)、
+Cognito(Web User Pool ×1)、API Gateway(HTTP API)、Lambda(Go)、Lambda Authorizer、DynamoDB(シングルテーブル)、
 S3(×2: フロントエンド配信用 / 画像保存用)、CloudFront、ACM、Route53。全てTerraformでIaC管理。
 
 ## 3. スコープ(MVP)
@@ -51,51 +52,72 @@ S3(×2: フロントエンド配信用 / 画像保存用)、CloudFront、ACM、R
 
 ## 4. Web UX方針
 
+詳細は `03-web.md`。
+
+- ログインはGoogle SSOのみ(メール/パスワード認証は提供しない)
 - ダッシュボード: 所有する全端末の**最新スナップショットを一覧表示**(定点カメラの「今の状態」を確認する用途)
 - 端末をクリックすると、その端末の**タイムライン/履歴**(定点観測の時系列変化)を閲覧できる
 - 地図表示は今回のスコープ外
 
 ## 5. 端末ライフサイクル・認証設計
 
-### Cognito構成
+詳細は `06-auth.md` を参照。ここでは方針の要点のみ記す。
 
-Web User PoolとDevice User Poolを分離する。Web利用者のログイン(メール/パスワード)と端末のIoT的な認証
-(QRペアリング経由でのみ払い出し、パスワードレス)は性質が異なるため、Poolを分けることで権限スコープの
-取り違えを構造的に防ぐ。
+### 認証基盤の構成
 
-### ペアリングフロー(QR + OTPの二段階認証)
+**Cognitoは Web User Pool のみを持つ。** 当初は端末用に Device User Pool を分離し、`CUSTOM_AUTH` による
+パスワードレス認証を行う設計だったが、Lambda Authorizerが毎リクエストDynamoDBを引いて端末の有効性を
+確認する以上、Cognitoに期待していたセッションライフサイクル管理の役割は実質的にDynamoDB側へ移っている。
+Cognitoに残るのはJWTの署名だけであり、その対価としてUser Pool 1つ分の管理・カスタム認証トリガー3本・
+ペアリング未完了時の孤児ユーザー問題を抱えることになるため、Device User Poolは作らない。
 
-QRコードの漏洩(スクリーンショット等)だけでは端末をペアリングできないよう、QRの使い捨てコードに加えて
-端末画面に表示される5桁OTPをWeb側で追加入力させる方式とする。
+端末の認証は、自前のデバイス資格情報(DynamoDB)+ Lambda Authorizerで完結させる。
 
-1. Web: オーナーが「端末を追加」を実行 → Lambdaが `PairingSession` をDynamoDBに作成
-   (使い捨てpairingCode、TTL 5分、status=PENDING) → QRコードとしてWebに表示
+### ペアリングフロー(QRのみ、OTP廃止)
+
+1. Web: オーナーが「端末を追加」で端末名を入力 → Lambdaが `TransactWriteItems` 1コールで
+   `Device` レコード(status=PENDING)と `PairingSession`(使い捨てpairingCode、TTL 5分)を作成
+   → QRコードとしてWebに表示。端末一覧には「ペアリング待ち」の行が即座に現れる
 2. 端末: EdgeWatcherアプリでQRをスキャン → `pairingCode` をバックエンドに送信
-3. バックエンド: コードを検証 → status=CLAIMEDに更新 → 5桁OTPを生成しDynamoDBに保存 → 端末にOTPを返す
-4. 端末: 画面にOTPを表示(「オーナーにこの番号を伝えてください」)
-5. Web: ステータスをポーリングしCLAIMEDを検知 → OTP入力欄を表示 → オーナーが端末の画面を見てOTPを入力 → 送信
-6. バックエンド: OTP一致を検証 → 一致すればDevice User Pool上に端末用Cognitoユーザーを作成しトークン発行、
-   DynamoDBに `Device` レコードを作成、status=CONFIRMED
-7. 端末: ポーリングでCONFIRMEDを検知 → トークン(IdToken/AccessToken/RefreshToken)を受信し暗号化保存
-   (EncryptedSharedPreferences) → 以後、定期アップロードを開始
-8. OTP不一致・タイムアウト時: status=FAILEDとし、トークンは発行しない(最初からやり直し)
+3. バックエンド: `TransactWriteItems` 1コールで、PairingSessionを条件付きでPENDING→CONSUMEDに更新し、
+   同時に `Device` をACTIVEに更新する。条件は「status=PENDING かつ expiresAt > now」。
+   条件が満たされなければ両方とも書かれないため、使い捨てが構造的に担保される
+4. バックエンド: `deviceSecret`(256bitランダム)を生成し、**ハッシュのみ**をDeviceレコードに保存。
+   平文は端末へのレスポンスで1度だけ返す
+5. 端末: `deviceSecret` を暗号化保存(EncryptedSharedPreferences)→ 短命のセッショントークンを取得
+   → 定期アップロードを開始
+6. Web: ポーリングでCONSUMEDを検知 → 「接続しました」に切り替わる
+
+`Device` レコードをペアリング開始時点で先に作り、`deviceId` を以後不変とするのは、端末を初期化しても
+別のAndroid端末に置き換えても、**再ペアリングすれば同じ観測地点として過去の画像履歴が繋がる**ようにするため。
+
+QRの漏洩に対しては **TTL 5分 + 一度きりの消費**のみで対応する。この QR はオーナーが目の前の端末を
+セットアップしている5分間しか存在せず、先に第三者にスキャンされていればオーナー自身のペアリングが
+失敗して異常に気づけるため、OTPによる二段階確認は行わない。
 
 ### 端末側UI(常時観測デバイス前提で最小限)
 
-- 未ペアリング時: QRスキャナ + 発行された5桁OTPの表示のみ
+- 未ペアリング時: QRスキャナのみ
 - ペアリング済み時: 「接続中のアカウント: `<メールアドレス等>`」の表示 + 「ログアウト」ボタンのみ
 - 常時給電(モバイルバッテリー等)を前提とするため、省電力のための機能制限は設けない
 
-### 削除とログアウトの違い
+### 端末の状態
 
-- **ログアウト(端末側から可能)**: ローカル保存トークンを破棄しForeground Serviceを停止、未ペアリング状態に
-  戻るクライアント側のみの操作。バックエンド側のDeviceレコード・Cognitoユーザーはそのまま残り、
-  Webの一覧には「未接続」として表示され続ける
-- **削除(Web側からのみ可能)**: 端末自体からは削除できない。Lambdaが
-  (a) Cognito Device Poolの当該ユーザーを `AdminDeleteUser` で完全削除(以後のリフレッシュ不可)、
-  (b) DynamoDBのDeviceレコードを削除、の2つを行う。さらに **Lambda Authorizerが毎リクエストDynamoDBの
-  Device存在確認を行う**ため、削除された瞬間、有効期限が残っているAccessTokenでも即座に拒否される
-  (JWT自体の有効期限だけに頼らない実質的な即時失効)
+`Device.status` は `PENDING`(ペアリング待ち)/ `ACTIVE`(資格情報が有効)/ `REVOKED`(切断済み)の3値。
+`ACTIVE` のうち最終受信が閾値を超えたものを、Web上で「応答なし」として派生表示する。
+これにより「Webから切断した端末」と「単に圏外・電源断の端末」を区別できる。
+
+### 切断・ログアウト・削除の違い
+
+- **セッション切断(Web側から)**: `sessionTokenHash` と `deviceSecretHash` の両方を失効させ
+  `REVOKED` にする。セッションだけを失効させても端末は `deviceSecret` で数秒後に再取得してしまうため、
+  両方を消して初めて切断として成立する。Deviceレコードと画像履歴は残り、再ペアリングで復帰できる
+- **ログアウト(端末側から)**: サーバ側の結果はセッション切断と同じで、違いは実行主体だけ。
+  端末はローカルの資格情報を破棄してForeground Serviceを停止する
+- **削除(Web側からのみ可能)**: 端末自体からは削除できない。LambdaがDynamoDBのDeviceレコードを削除する。
+  **Lambda Authorizerが毎リクエストDynamoDBのDevice存在確認を行う**ため、削除された瞬間、
+  有効期限が残っているセッショントークンでも即座に拒否される。さらに端末は401を受けると
+  ローカルの資格情報を破棄して未ペアリング画面に戻るため、削除操作が端末側の後始末まで波及する
 
 ## 6. 配信・送信ポリシー
 
@@ -140,23 +162,26 @@ Android の `WorkManager` の `PeriodicWorkRequest` はOS側の制約で最短�
 
 - 個人開発でリリース列が1本しかないため、「prodに出す前の最終リハーサル環境」というstg本来の役割を
   devがそのまま兼ねられる
-- 1環境あたりCognito Pool×2 / DynamoDB / S3×2 / API Gateway / CloudFront / ACM / Route53レコードが
+- 1環境あたりCognito Pool / DynamoDB / S3×2 / API Gateway / CloudFront / ACM×2 / Route53レコードが
   必要な構成のため、環境を1つ減らす効果(コスト・構築の手間)が大きい
 - Androidアプリのビルドバリアントも dev / prod の2種類で収まり、接続先の管理がシンプルになる
 
 stgが担うはずだった「Terraformのapplyが本当に通るかをprod適用前に確認する」役割は、
 **必ず dev → prod の順で apply する**という運用ルールで代替する。
 
-各環境ごとにAWSリソース(Cognito Pool×2、DynamoDB、S3、API Gateway、CloudFrontなど)を独立して持つ。
+AWSアカウントは単一とし、dev / prodはリソース名のプレフィックス(`edgewatcher-<env>-<name>`)で分離する。
+各環境ごとにAWSリソース(Cognito Pool、DynamoDB、S3、API Gateway、CloudFrontなど)を独立して持つ。
 
-Terraformの構成方針:
+Terraformの構成方針(詳細は `02-infra.md`):
 
 - **モジュール分離**: リソース定義は `modules/` 配下に共通モジュールとして切り出す(Cognito、API、Storage等の単位)
 - **envディレクトリ分離**: `envs/dev`, `envs/prod` のように環境ごとにディレクトリを分け、
   各ディレクトリから共通モジュールを呼び出す
 - **変数分離**: 環境ごとの値(ドメイン名、リソース名のsuffix等)は各envディレクトリ配下の変数ファイル
   (`terraform.tfvars`等)で分離して管理する
-- **state分離**: tfstateも環境ごとに完全に分離する。誤って本番環境に適用してしまうリスクを避ける
+- **state分離**: tfstateも環境ごとに完全に分離する。誤って本番環境に適用してしまうリスクを避ける。
+  加えて、環境を跨ぐリソース(Route53ホストゾーン、tfstate用バケット、GitHub OIDCプロバイダ)は
+  `shared` スタックにまとめる
 
 ### デプロイ契機
 
@@ -182,6 +207,6 @@ planを確認しないまま本番データを破壊する事故が起こりう�
 - DynamoDBの詳細なテーブル/インデックス設計(シングルテーブル設計の方針は決定済み、PK/SK設計は未確定)
 - Androidアプリの詳細設計(カメラ/位置情報取得の実装方式、ローカルバッファの実装方式など)
 - Webアプリの詳細設計(画面遷移、状態管理など)
-- CI/CD・Terraformのモジュール構成などの運用設計(環境構成とデプロイ契機は決定済み、
-  モジュールの粒度やワークフローの具体的な定義は未確定)
+- CI/CDのワークフローの具体的な定義(Terraformのスタック構成・モジュール粒度・AWS認証方式は
+  `02-infra.md` で決定済み)
 - 非機能要件(監視・アラート、コスト試算など)

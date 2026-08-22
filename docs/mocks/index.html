@@ -1,0 +1,594 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EdgeWatcher Web モック</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b23;
+    --panel-2: #1d232d;
+    --line: #2a323f;
+    --text: #e6edf3;
+    --muted: #8b98a9;
+    --accent: #f0b429;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --off: #6e7b8c;
+    --danger: #f85149;
+    --radius: 10px;
+    font-synthesis-weight: none;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    display: grid;
+    grid-template-columns: 288px 1fr;
+    font-size: 14px;
+  }
+
+  /* ---------- モックの外枠(シナリオ切り替え) ---------- */
+  .chrome {
+    background: #0a0d12;
+    border-right: 1px solid var(--line);
+    overflow-y: auto;
+    padding: 20px 16px 40px;
+  }
+  .chrome h1 {
+    font-size: 13px;
+    letter-spacing: .12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin: 0 0 4px;
+  }
+  .chrome .sub { color: var(--muted); font-size: 12px; margin: 0 0 22px; line-height: 1.6; }
+  .group { margin-bottom: 18px; }
+  .group > .group-label {
+    font-size: 11px; color: var(--muted); letter-spacing: .08em;
+    margin: 0 0 6px; padding-left: 8px;
+  }
+  .scenario {
+    display: block; width: 100%; text-align: left;
+    background: transparent; border: 1px solid transparent;
+    color: var(--text); padding: 8px 10px; border-radius: 8px;
+    font: inherit; cursor: pointer; margin-bottom: 2px; line-height: 1.4;
+  }
+  .scenario:hover { background: var(--panel); }
+  .scenario[aria-current="true"] {
+    background: var(--panel-2); border-color: var(--accent);
+  }
+  .scenario small { display: block; color: var(--muted); font-size: 11px; margin-top: 2px; }
+
+  /* ---------- 画面が入る枠 ---------- */
+  .stage { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+  .stage-head {
+    padding: 16px 24px; border-bottom: 1px solid var(--line);
+    background: #0a0d12;
+  }
+  .stage-head h2 { margin: 0 0 4px; font-size: 15px; }
+  .stage-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; max-width: 90ch; }
+  .viewport { flex: 1; overflow: auto; padding: 24px; background: #070a0e; }
+  .frame {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 14px;
+    overflow: hidden; min-height: 620px; display: flex; position: relative;
+    box-shadow: 0 20px 50px rgba(0,0,0,.45);
+  }
+
+  /* ---------- アプリのシェル ---------- */
+  .sidebar {
+    width: 84px; border-right: 1px solid var(--line); background: var(--panel);
+    display: flex; flex-direction: column; align-items: center; padding: 18px 0; gap: 6px;
+    flex-shrink: 0;
+  }
+  .logo {
+    width: 32px; height: 32px; border-radius: 9px; margin-bottom: 16px;
+    background: linear-gradient(135deg, var(--accent), #c2410c);
+  }
+  .nav {
+    width: 60px; padding: 10px 4px; border-radius: 10px; text-align: center;
+    color: var(--muted); font-size: 10px; line-height: 1.3; cursor: pointer;
+    border: 1px solid transparent;
+  }
+  .nav .ico { display: block; font-size: 17px; margin-bottom: 3px; }
+  .nav.active { background: var(--panel-2); color: var(--text); border-color: var(--line); }
+  .spacer { flex: 1; }
+  .avatar {
+    width: 36px; height: 36px; border-radius: 50%; cursor: pointer;
+    background: linear-gradient(135deg,#4f8cc9,#2d5f8a);
+    display: grid; place-items: center; font-size: 13px; font-weight: 600;
+    border: 2px solid var(--line);
+  }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+  .topbar {
+    padding: 18px 24px; border-bottom: 1px solid var(--line);
+    display: flex; align-items: center; gap: 12px;
+  }
+  .topbar h3 { margin: 0; font-size: 16px; }
+  .topbar .count { color: var(--muted); font-size: 12px; }
+  .content { padding: 24px; flex: 1; overflow: auto; }
+
+  /* ---------- 部品 ---------- */
+  .btn {
+    font: inherit; padding: 7px 14px; border-radius: 8px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+  }
+  .btn:hover { border-color: var(--muted); }
+  .btn.primary { background: var(--accent); color: #1b1300; border-color: var(--accent); font-weight: 600; }
+  .btn.danger { color: var(--danger); }
+  .btn.sm { padding: 5px 10px; font-size: 12px; }
+  .btn[disabled] { opacity: .4; cursor: not-allowed; }
+  .push { margin-left: auto; }
+
+  .badge {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: var(--muted);
+  }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--off); }
+  .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(63,185,80,.15); }
+  .dot.warn { background: var(--warn); }
+  .dot.pending { background: var(--accent); animation: pulse 1.6s infinite; }
+  .dot.revoked { background: var(--danger); }
+  @keyframes pulse { 50% { opacity: .25; } }
+
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius);
+    overflow: hidden; cursor: pointer;
+  }
+  .card:hover { border-color: var(--muted); }
+  .shot { aspect-ratio: 4/3; position: relative; }
+  .shot .stamp {
+    position: absolute; right: 8px; bottom: 8px; background: rgba(0,0,0,.6);
+    padding: 2px 7px; border-radius: 5px; font-size: 11px; color: #fff;
+    font-variant-numeric: tabular-nums;
+  }
+  .card-body { padding: 11px 13px; display: flex; align-items: center; gap: 8px; }
+  .card-body .name { font-weight: 600; }
+  .placeholder {
+    aspect-ratio: 4/3; display: grid; place-items: center; gap: 8px;
+    background: repeating-linear-gradient(45deg, #12171e, #12171e 10px, #151b23 10px, #151b23 20px);
+    color: var(--muted); font-size: 12px; text-align: center; padding: 16px;
+  }
+
+  table { width: 100%; border-collapse: collapse; }
+  th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--line); }
+  th { font-size: 11px; color: var(--muted); font-weight: 600; letter-spacing: .05em; }
+  td { font-size: 13px; }
+  tbody tr:hover { background: var(--panel); }
+  .num { font-variant-numeric: tabular-nums; color: var(--muted); }
+  select {
+    font: inherit; font-size: 12px; background: var(--panel-2); color: var(--text);
+    border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px;
+  }
+  .row-actions { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .kebab {
+    border: 1px solid transparent; background: none; color: var(--muted);
+    cursor: pointer; padding: 4px 8px; border-radius: 6px; font-size: 16px; line-height: 1;
+  }
+  .kebab:hover { background: var(--panel-2); border-color: var(--line); }
+
+  .empty { text-align: center; padding: 90px 20px; color: var(--muted); }
+  .empty h4 { color: var(--text); margin: 0 0 8px; font-size: 16px; }
+  .empty p { margin: 0 0 20px; line-height: 1.7; }
+
+  /* ---------- ログイン ---------- */
+  .login { flex: 1; display: grid; place-items: center; }
+  .login-box { width: 340px; text-align: center; }
+  .login-box .logo { margin: 0 auto 20px; width: 44px; height: 44px; }
+  .login-box h3 { margin: 0 0 6px; font-size: 20px; }
+  .login-box p { color: var(--muted); margin: 0 0 28px; line-height: 1.7; font-size: 13px; }
+  .google {
+    width: 100%; display: flex; align-items: center; justify-content: center; gap: 10px;
+    background: #fff; color: #1f1f1f; border: none; border-radius: 8px;
+    padding: 11px; font: inherit; font-weight: 600; cursor: pointer;
+  }
+  .gmark { width: 18px; height: 18px; border-radius: 50%;
+    background: conic-gradient(#ea4335 0 25%, #fbbc05 0 50%, #34a853 0 75%, #4285f4 0); }
+
+  /* ---------- 履歴スクラバー ---------- */
+  .viewer { max-width: 780px; margin: 0 auto; }
+  .viewer .big { aspect-ratio: 4/3; border-radius: var(--radius); position: relative; overflow: hidden; }
+  .viewer .big .stamp {
+    position: absolute; left: 12px; bottom: 12px; background: rgba(0,0,0,.65);
+    padding: 4px 10px; border-radius: 6px; font-size: 13px; font-variant-numeric: tabular-nums;
+  }
+  .transport { display: flex; align-items: center; gap: 14px; margin: 16px 0 6px; }
+  .track { flex: 1; height: 4px; border-radius: 2px; background: var(--panel-2); position: relative; }
+  .track .fill { position: absolute; inset: 0 auto 0 0; width: 62%; background: var(--accent); border-radius: 2px; }
+  .track .knob {
+    position: absolute; left: 62%; top: 50%; width: 14px; height: 14px; border-radius: 50%;
+    background: var(--accent); transform: translate(-50%,-50%); border: 2px solid var(--bg);
+  }
+  .ticks { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; padding: 0 44px 0 0; }
+  .strip { display: flex; gap: 6px; margin-top: 16px; justify-content: center; }
+  .strip .cell { width: 74px; aspect-ratio: 4/3; border-radius: 6px; border: 2px solid transparent; cursor: pointer; }
+  .strip .cell.sel { border-color: var(--accent); }
+
+  /* ---------- モーダル ---------- */
+  .overlay {
+    position: absolute; inset: 0; background: rgba(4,6,10,.72);
+    display: grid; place-items: center; padding: 24px;
+  }
+  .modal {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 12px;
+    width: 400px; padding: 24px; text-align: center;
+  }
+  .modal.left { text-align: left; }
+  .modal h4 { margin: 0 0 8px; font-size: 16px; }
+  .modal p { color: var(--muted); font-size: 13px; line-height: 1.7; margin: 0 0 18px; }
+  .field { text-align: left; margin-bottom: 18px; }
+  .field label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .field input {
+    width: 100%; font: inherit; padding: 9px 11px; border-radius: 8px;
+    background: var(--bg); border: 1px solid var(--line); color: var(--text);
+  }
+  .qr { width: 190px; height: 190px; margin: 0 auto 14px; padding: 10px; background: #fff; border-radius: 10px; }
+  .qr.expired { filter: blur(5px) grayscale(1); opacity: .5; }
+  .countdown { font-variant-numeric: tabular-nums; color: var(--accent); font-weight: 600; margin-bottom: 18px; }
+  .actions { display: flex; gap: 8px; justify-content: flex-end; }
+  .success-mark {
+    width: 54px; height: 54px; border-radius: 50%; margin: 0 auto 16px;
+    background: rgba(63,185,80,.12); color: var(--ok);
+    display: grid; place-items: center; font-size: 26px;
+  }
+  .menu {
+    position: absolute; right: 40px; top: 190px; width: 176px; padding: 5px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    box-shadow: 0 12px 30px rgba(0,0,0,.5);
+  }
+  .menu button {
+    display: block; width: 100%; text-align: left; background: none; border: none;
+    color: var(--text); font: inherit; font-size: 13px; padding: 8px 10px;
+    border-radius: 6px; cursor: pointer;
+  }
+  .menu button:hover { background: var(--panel); }
+  .menu button.danger { color: var(--danger); }
+  .note {
+    margin-top: 14px; padding: 10px 12px; border-radius: 8px; font-size: 12px;
+    background: rgba(240,180,41,.08); border: 1px solid rgba(240,180,41,.25);
+    color: #f0d9a4; line-height: 1.6;
+  }
+</style>
+</head>
+<body>
+
+<nav class="chrome">
+  <h1>EdgeWatcher</h1>
+  <p class="sub">Web アプリのモック。<br>状況を選ぶと、その状態の画面に切り替わります。<br>設計: <code>docs/03-web.md</code></p>
+  <div id="scenarios"></div>
+</nav>
+
+<div class="stage">
+  <div class="stage-head">
+    <h2 id="sc-title"></h2>
+    <p id="sc-note"></p>
+  </div>
+  <div class="viewport"><div class="frame" id="frame"></div></div>
+</div>
+
+<script>
+// ---------- ダミーの「写真」 ----------
+// 外部画像を持たせず、時刻から決まるグラデーションで景色を模す
+function shot(seed, hour) {
+  const day = hour >= 6 && hour < 18;
+  const sky = day
+    ? `linear-gradient(#7fa8cd ${20 + (seed % 7)}%, #b9cfe0 55%)`
+    : `linear-gradient(#141c2b ${20 + (seed % 7)}%, #2b3242 55%)`;
+  const ground = day ? '#3f4a37' : '#1a1f1a';
+  return `background:
+      linear-gradient(transparent 0 58%, ${ground} 58% 100%),
+      ${sky};`;
+}
+const px = (seed, hour) => `<div class="shot" style="${shot(seed, hour)}">`;
+
+function badge(state) {
+  const map = {
+    active:  ['ok',      '接続中'],
+    stale:   ['warn',    '応答なし'],
+    pending: ['pending', 'ペアリング待ち'],
+    revoked: ['revoked', '切断済み'],
+  };
+  const [cls, label] = map[state];
+  return `<span class="badge"><span class="dot ${cls}"></span>${label}</span>`;
+}
+
+// ---------- 端末のダミーデータ ----------
+const DEVICES = [
+  { id: 'd1', name: '玄関',   state: 'active',  last: '2分前',  interval: '5分',  seed: 3, hour: 14 },
+  { id: 'd2', name: '裏庭',   state: 'active',  last: '4分前',  interval: '5分',  seed: 8, hour: 14 },
+  { id: 'd3', name: '駐車場', state: 'stale',   last: '3時間前', interval: '10分', seed: 1, hour: 21 },
+];
+
+// ---------- 画面 ----------
+function shell(page, content, extra = '') {
+  const nav = (id, ico, label) =>
+    `<div class="nav ${page === id ? 'active' : ''}"><span class="ico">${ico}</span>${label}</div>`;
+  return `
+    <aside class="sidebar">
+      <div class="logo"></div>
+      ${nav('dashboard', '▦', '最新画像')}
+      ${nav('devices', '☰', '端末一覧')}
+      <div class="spacer"></div>
+      <div class="avatar" title="pentyan0303@gmail.com">S</div>
+    </aside>
+    <div class="main">${content}</div>
+    ${extra}`;
+}
+
+function dashboard(devices) {
+  if (!devices.length) {
+    return shell('dashboard', `
+      <div class="topbar"><h3>最新画像</h3></div>
+      <div class="content">
+        <div class="empty">
+          <h4>まだ端末がありません</h4>
+          <p>Android 端末に EdgeWatcher をインストールし、<br>QR コードを読み取らせるとここに画像が並びます。</p>
+          <button class="btn primary">端末を追加</button>
+        </div>
+      </div>`);
+  }
+  const cards = devices.map(d => {
+    const body = `<div class="card-body"><span class="name">${d.name}</span>
+        <span class="push">${badge(d.state)}</span></div>`;
+    if (d.state === 'pending' || d.state === 'revoked') {
+      const msg = d.state === 'pending'
+        ? 'QR コードの読み取り待ち'
+        : '切断済み。再ペアリングが必要です';
+      return `<div class="card"><div class="placeholder">${msg}</div>${body}</div>`;
+    }
+    return `<div class="card">${px(d.seed, d.hour)}
+        <span class="stamp">${d.last}</span></div>${body}</div>`;
+  }).join('');
+  return shell('dashboard', `
+    <div class="topbar"><h3>最新画像</h3><span class="count">${devices.length} 台</span></div>
+    <div class="content"><div class="grid">${cards}</div></div>`);
+}
+
+function history() {
+  const cells = [0,1,2,3,4,5,6].map(i =>
+    `<div class="cell ${i === 3 ? 'sel' : ''}" style="${shot(i + 2, 12 + i)}"></div>`).join('');
+  return shell('dashboard', `
+    <div class="topbar">
+      <button class="btn sm">← 戻る</button>
+      <h3>玄関</h3><span class="count">過去1週間</span>
+    </div>
+    <div class="content">
+      <div class="viewer">
+        <div class="big" style="${shot(3, 14)}"><span class="stamp">2026-08-20 14:35</span></div>
+        <div class="transport">
+          <button class="btn sm">▶</button>
+          <div class="track"><div class="fill"></div><div class="knob"></div></div>
+          <span class="num">最新へ</span>
+        </div>
+        <div class="ticks"><span>8/16</span><span>8/17</span><span>8/18</span><span>8/19</span><span>8/20</span><span>今</span></div>
+        <div class="strip">${cells}</div>
+      </div>
+    </div>`);
+}
+
+function deviceRow(d) {
+  let action;
+  if (d.pairing) action = `<button class="btn sm primary">QR を表示</button>`;
+  else if (d.state === 'revoked') action = `<button class="btn sm">再ペアリング</button>`;
+  else if (d.state === 'pending') action = `<button class="btn sm primary">QR を表示</button>`;
+  else action = `<button class="btn sm">セッション切断</button>`;
+  const interval = d.state === 'pending'
+    ? '<span class="num">—</span>'
+    : `<select><option>5分</option><option>10分</option><option>15分</option></select>`;
+  return `<tr>
+    <td><strong>${d.name}</strong></td>
+    <td>${badge(d.state)}</td>
+    <td class="num">${d.last}</td>
+    <td>${interval}</td>
+    <td><div class="row-actions">${action}<button class="kebab">⋮</button></div></td>
+  </tr>`;
+}
+
+function deviceList(devices, extra = '') {
+  return shell('devices', `
+    <div class="topbar">
+      <h3>端末一覧</h3><span class="count">${devices.length} 台</span>
+      <button class="btn primary push">端末を追加</button>
+    </div>
+    <div class="content">
+      <table>
+        <thead><tr><th>端末名</th><th>状態</th><th>最終受信</th><th>送信間隔</th><th></th></tr></thead>
+        <tbody>${devices.map(deviceRow).join('')}</tbody>
+      </table>
+    </div>`, extra);
+}
+
+// QR の見た目だけを模した SVG(実データではない)
+function qrSvg() {
+  let cells = '';
+  for (let y = 0; y < 21; y++) for (let x = 0; x < 21; x++) {
+    const finder = (x < 7 && y < 7) || (x > 13 && y < 7) || (x < 7 && y > 13);
+    const edge = finder && (x % 6 === 0 || y % 6 === 0 || (x > 1 && x < 5 && y > 1 && y < 5));
+    const on = finder ? edge : ((x * 7 + y * 13 + ((x * y) % 5)) % 3 === 0);
+    if (on) cells += `<rect x="${x}" y="${y}" width="1" height="1"/>`;
+  }
+  return `<svg class="qr" viewBox="0 0 21 21" shape-rendering="crispEdges" fill="#000">${cells}</svg>`;
+}
+
+function modal(inner, cls = '') {
+  return `<div class="overlay"><div class="modal ${cls}">${inner}</div></div>`;
+}
+
+// ---------- シナリオ ----------
+const SCENARIOS = [
+  { group: '認証', id: 'login',
+    title: 'ログイン前',
+    note: '未認証で認証必須ルートに来た場合もこの画面へリダイレクトし、ログイン後に元のルートへ戻す。ログイン手段は Google SSO のみで、サインアップ画面もパスワード再設定もない。',
+    render: () => `<div class="login"><div class="login-box">
+        <div class="logo"></div>
+        <h3>EdgeWatcher</h3>
+        <p>余っている Android 端末を、<br>定点観測デバイスとして使う。</p>
+        <button class="google"><span class="gmark"></span>Google で続行</button>
+      </div></div>` },
+
+  { group: '認証', id: 'empty',
+    title: 'ログイン後 / 端末0台',
+    note: '初回ログイン直後。空状態から「端末を追加」へ導線を出す。',
+    render: () => dashboard([]) },
+
+  { group: '最新画像', id: 'dashboard',
+    title: '最新画像一覧',
+    note: '登録端末の最新スナップショットをカードで並べる。60秒ごとに再取得(送信間隔が最短5分のため、これより短く引く意味がない)。カードをクリックすると履歴画面へ。',
+    render: () => dashboard(DEVICES) },
+
+  { group: '最新画像', id: 'dashboard-mixed',
+    title: '最新画像一覧 / 未受信の端末が混在',
+    note: 'ペアリング待ち・切断済みの端末はまだ画像が無いので、画像の代わりに状態を示すプレースホルダを出す。',
+    render: () => dashboard([
+      ...DEVICES,
+      { id: 'd4', name: '物置', state: 'pending', last: '—', seed: 0, hour: 12 },
+      { id: 'd5', name: '倉庫', state: 'revoked', last: '5日前', seed: 0, hour: 12 },
+    ]) },
+
+  { group: '最新画像', id: 'history',
+    title: '履歴(スクラバー)',
+    note: '中央に1枚を大きく表示し、下の時刻スライダーで移動する。再生ボタンでタイムラプス。5分間隔なら1週間で約2000枚になるため、取得は1日単位のページングで、スライダーが日付を跨いだ時点で追加ロードする。',
+    render: () => history() },
+
+  { group: '端末一覧', id: 'devices',
+    title: '端末一覧',
+    note: '操作列は状態依存のボタン1つ。接続中・応答なしなら [セッション切断]、切断済みなら [再ペアリング]、ペアリング中なら [QR を表示] に変わる。送信間隔は行内のセレクトで変更でき、Pull 型配信のため最大1送信サイクル遅れて反映される。',
+    render: () => deviceList(DEVICES) },
+
+  { group: '端末一覧', id: 'devices-all',
+    title: '端末一覧 / 全状態',
+    note: '4つの状態が並んだところ。ボタンが状態から一意に決まるので、enable / disable を UI 側で個別管理する必要がない。',
+    render: () => deviceList([
+      ...DEVICES,
+      { id: 'd4', name: '物置', state: 'pending', last: '—',     interval: '—', pairing: true },
+      { id: 'd5', name: '倉庫', state: 'revoked', last: '5日前', interval: '5分' },
+    ]) },
+
+  { group: '端末一覧', id: 'menu',
+    title: '⋮ メニューを開いた状態',
+    note: '削除は取り返しがつかない(画像履歴ごと消える)ため、確認ダイアログを挟む。端末側からの削除は許可しない。',
+    render: () => deviceList(DEVICES, `<div class="menu">
+        <button>名前の変更</button>
+        <button class="danger">この端末を削除</button>
+      </div>`) },
+
+  { group: '端末一覧', id: 'delete',
+    title: '削除の確認',
+    note: 'セッション切断との違いを明示する。切断なら履歴は残り再ペアリングで復帰できるが、削除は履歴ごと失われる。',
+    render: () => deviceList(DEVICES, modal(`
+      <h4>「駐車場」を削除しますか?</h4>
+      <p>この端末の観測画像もすべて削除されます。取り消せません。<br>
+         一時的に止めたいだけなら「セッション切断」を使ってください。切断なら履歴は残り、再ペアリングで復帰できます。</p>
+      <div class="actions">
+        <button class="btn">キャンセル</button>
+        <button class="btn danger">削除する</button>
+      </div>`, 'left')) },
+
+  { group: 'ペアリング', id: 'pair-name',
+    title: '端末を追加 ① 名前を入力',
+    note: '名前を先に入力させるのは、この直後に status = PENDING の行が一覧へ即座に現れるため。名前がないと何の行なのか判別できない。',
+    render: () => deviceList(DEVICES, modal(`
+      <h4>端末を追加</h4>
+      <p>設置場所が分かる名前を付けてください。あとから変更できます。</p>
+      <div class="field">
+        <label>端末名</label>
+        <input value="物置">
+      </div>
+      <div class="actions">
+        <button class="btn">キャンセル</button>
+        <button class="btn primary">QR コードを表示</button>
+      </div>`, 'left')) },
+
+  { group: 'ペアリング', id: 'pair-qr',
+    title: '端末を追加 ② QR 表示中',
+    note: 'Device レコードは既に PENDING で作られ、一覧にも「ペアリング待ち」の行が出ている。2秒間隔でポーリングし、端末がスキャンすると次の状態へ。QR の TTL は5分で、一度きりしか消費できない。',
+    render: () => deviceList([...DEVICES, { id:'d4', name:'物置', state:'pending', last:'—', pairing:true }],
+      modal(`
+        <h4>「物置」をペアリング</h4>
+        <p>Android 端末の EdgeWatcher アプリで、<br>この QR コードを読み取ってください。</p>
+        ${qrSvg()}
+        <div class="countdown">残り 4:32</div>
+        <div class="actions" style="justify-content:center">
+          <button class="btn">キャンセル</button>
+        </div>`)) },
+
+  { group: 'ペアリング', id: 'pair-expired',
+    title: '端末を追加 ③ QR の期限切れ',
+    note: '期限が切れたら QR を伏せて再発行ボタンを出す。再発行は PairingSession を作り直すだけで、Device レコードは作り直さない(deviceId は不変)。',
+    render: () => deviceList([...DEVICES, { id:'d4', name:'物置', state:'pending', last:'—', pairing:true }],
+      modal(`
+        <h4>有効期限が切れました</h4>
+        <p>QR コードは5分で無効になります。<br>もう一度発行してください。</p>
+        ${qrSvg().replace('class="qr"', 'class="qr expired"')}
+        <div class="actions" style="justify-content:center">
+          <button class="btn">キャンセル</button>
+          <button class="btn primary">QR を再発行</button>
+        </div>`)) },
+
+  { group: 'ペアリング', id: 'pair-done',
+    title: '端末を追加 ④ 接続しました',
+    note: '端末がスキャンした時点でサーバは PairingSession を CONSUMED にし、Device を ACTIVE に更新する。この2つは TransactWriteItems の1コールで、条件が落ちれば両方とも書かれない。',
+    render: () => deviceList([...DEVICES, { id:'d4', name:'物置', state:'active', last:'たった今', interval:'5分' }],
+      modal(`
+        <div class="success-mark">✓</div>
+        <h4>「物置」が接続しました</h4>
+        <p>まもなく最初の画像が届きます。<br>送信間隔は端末一覧から変更できます。</p>
+        <div class="actions" style="justify-content:center">
+          <button class="btn primary">閉じる</button>
+        </div>`)) },
+
+  { group: 'ペアリング', id: 'repair',
+    title: '再ペアリング中',
+    note: '切断済みの端末から [再ペアリング] を押した状態。deviceId が変わらないため、端末を初期化しても別の Android 端末に置き換えても、過去の画像履歴が同じ観測地点として繋がり続ける。',
+    render: () => deviceList([...DEVICES, { id:'d5', name:'倉庫', state:'revoked', last:'5日前', interval:'5分', pairing:true }],
+      modal(`
+        <h4>「倉庫」を再ペアリング</h4>
+        <p>新しい QR コードを発行しました。<br>過去の画像履歴はそのまま引き継がれます。</p>
+        ${qrSvg()}
+        <div class="countdown">残り 4:58</div>
+        <div class="actions" style="justify-content:center">
+          <button class="btn">キャンセル</button>
+        </div>`)) },
+];
+
+// ---------- 切り替え ----------
+const list = document.getElementById('scenarios');
+const frame = document.getElementById('frame');
+const title = document.getElementById('sc-title');
+const note = document.getElementById('sc-note');
+let current = SCENARIOS[0].id;
+
+function draw() {
+  const sc = SCENARIOS.find(s => s.id === current);
+  frame.innerHTML = sc.render();
+  title.textContent = sc.title;
+  note.textContent = sc.note;
+  [...list.querySelectorAll('.scenario')].forEach(b =>
+    b.setAttribute('aria-current', String(b.dataset.id === current)));
+}
+
+let lastGroup = null;
+SCENARIOS.forEach(sc => {
+  if (sc.group !== lastGroup) {
+    lastGroup = sc.group;
+    const g = document.createElement('div');
+    g.className = 'group-label';
+    g.textContent = sc.group;
+    list.appendChild(g);
+  }
+  const b = document.createElement('button');
+  b.className = 'scenario';
+  b.dataset.id = sc.id;
+  b.textContent = sc.title;
+  b.onclick = () => { current = sc.id; draw(); };
+  list.appendChild(b);
+});
+
+draw();
+</script>
+</body>
+</html>
