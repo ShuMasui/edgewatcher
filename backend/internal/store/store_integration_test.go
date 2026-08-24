@@ -147,6 +147,52 @@ func TestListOwnerDevices_MixesDevicesAndPairingSessions(t *testing.T) {
 	}
 }
 
+// TestListOwnerDevices_ExcludesArchivedDevice pins the structural basis for
+// "ARCHIVED devices don't count toward the device limit"
+// (docs/engineering/dynamodb.md §4, docs/03-web.md §1.9, and Task 11's 429):
+// archiving a device swaps its GSI1PK from "OWNER#<ownerId>" to the literal
+// partition "ARCHIVED", so it simply isn't a member of the OWNER#<ownerId>
+// partition ListOwnerDevices queries — no FilterExpression involved, and
+// none should ever be added here.
+func TestListOwnerDevices_ExcludesArchivedDevice(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	owner := "owner-archived-check"
+
+	live := Device{
+		PK: deviceKey("d-live"), SK: deviceKey("d-live"),
+		EntityType: "Device", DeviceID: "d-live", OwnerID: owner,
+		Name: "Still here", Status: "PAIRED", Interval: 5,
+		GSI1PK: ownerGSI1PK(owner), GSI1SK: deviceGSI1SK("d-live"),
+	}
+	putRawItem(t, ctx, client, table, live)
+
+	// Mimics Task 7's ArchiveDevice: GSI1PK swapped to the "ARCHIVED"
+	// partition, PK/SK and ownership otherwise unchanged.
+	archived := Device{
+		PK: deviceKey("d-archived"), SK: deviceKey("d-archived"),
+		EntityType: "Device", DeviceID: "d-archived", OwnerID: owner,
+		Name: "Deleted", Status: "ARCHIVED", Interval: 5,
+		ArchivedAt: time.Now().Format(time.RFC3339),
+		GSI1PK:     "ARCHIVED", GSI1SK: deviceGSI1SK("d-archived"),
+	}
+	putRawItem(t, ctx, client, table, archived)
+
+	rows, err := s.ListOwnerDevices(ctx, owner)
+	if err != nil {
+		t.Fatalf("ListOwnerDevices: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected exactly 1 row (the live device), got %d: %+v", len(rows), rows)
+	}
+	if rows[0].DeviceID != "d-live" {
+		t.Fatalf("expected the live device, got %+v — an ARCHIVED device leaked into the owner's list", rows[0])
+	}
+}
+
 // TestGSI1ProjectionExcludesOwnerID is the drift-detection test the task
 // brief requires: if someone widens the Terraform GSI1 projection to
 // include ownerId, this test must fail loudly rather than production

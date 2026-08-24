@@ -13,7 +13,7 @@
 FUNCTIONS := authorizer web-api device-auth device-api
 DIST      := dist
 
-.PHONY: build clean fmt vet test lint $(FUNCTIONS)
+.PHONY: build clean fmt vet test test-integration lint $(FUNCTIONS)
 
 build: $(FUNCTIONS)
 
@@ -30,6 +30,17 @@ vet:
 
 test:
 	go test -race ./...
+
+# Requires a DynamoDB Local instance reachable at DYNAMO_ENDPOINT (defaults
+# to http://localhost:8000, matching amazon/dynamodb-local's default port).
+# No AWS account or credentials are ever used — internal/store's harness
+# supplies static dummy credentials.
+#
+#   docker run -d --name ew-dynamodb-local -p 8000:8000 amazon/dynamodb-local
+#   make test-integration
+#   docker rm -f ew-dynamodb-local
+test-integration:
+	DYNAMO_ENDPOINT=$${DYNAMO_ENDPOINT:-http://localhost:8000} go test -race -tags=integration ./internal/store/...
 
 lint: fmt vet
 

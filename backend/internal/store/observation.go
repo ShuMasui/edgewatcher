@@ -34,6 +34,10 @@ func (s *Store) QueryObservationsByDay(ctx context.Context, deviceID, dateStr st
 
 	pk := deviceKey(deviceID)
 
+	// No LastEvaluatedKey pagination loop here: docs/engineering/dynamodb.md
+	// §5.2 bounds one JST day at 288 observations (5-minute interval), which
+	// is far under a single Query page (1 MB). If the minimum interval or
+	// the day-based history unit ever changes, revisit this.
 	out, err := s.client.Query(ctx, &dynamodb.QueryInput{
 		TableName:              &s.table,
 		KeyConditionExpression: strPtr("PK = :pk AND SK BETWEEN :lo AND :hi"),

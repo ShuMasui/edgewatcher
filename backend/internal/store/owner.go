@@ -23,6 +23,13 @@ import (
 func (s *Store) ListOwnerDevices(ctx context.Context, ownerID string) ([]OwnerListRow, error) {
 	pk := ownerGSI1PK(ownerID)
 
+	// No LastEvaluatedKey pagination loop here: a single Query page (1 MB)
+	// comfortably holds this result set today. docs/03-web.md §1.9 caps an
+	// owner at DEVICE_LIMIT paired devices (single digits in practice), plus
+	// at most one PairingSession per device, and ARCHIVED devices are
+	// structurally excluded from this partition (docs/engineering/dynamodb.md
+	// §4) rather than filtered out here. If the device limit is ever raised
+	// by orders of magnitude, revisit this.
 	out, err := s.client.Query(ctx, &dynamodb.QueryInput{
 		TableName:              &s.table,
 		IndexName:              strPtr("GSI1"),
