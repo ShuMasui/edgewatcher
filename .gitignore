@@ -32,3 +32,6 @@ web/.env.*.local
 
 # macOS
 .DS_Store
+
+# スパイクアプリ(計測用の使い捨てコード。本番には含めない)
+spike/
