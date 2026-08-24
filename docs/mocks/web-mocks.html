@@ -131,7 +131,7 @@
   .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(63,185,80,.15); }
   .dot.warn { background: var(--warn); }
   .dot.pending { background: var(--accent); animation: pulse 1.6s infinite; }
-  .dot.revoked { background: var(--danger); }
+  .dot.disconnected { background: var(--danger); }
   @keyframes pulse { 50% { opacity: .25; } }
 
   .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
@@ -252,6 +252,59 @@
     background: rgba(240,180,41,.08); border: 1px solid rgba(240,180,41,.25);
     color: #f0d9a4; line-height: 1.6;
   }
+
+  /* ---------- ログアウトのポップオーバー ---------- */
+  .popover {
+    position: absolute; left: 92px; bottom: 16px; width: 236px; padding: 5px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    box-shadow: 0 12px 30px rgba(0,0,0,.5);
+  }
+  .popover .who {
+    padding: 9px 10px 11px; border-bottom: 1px solid var(--line); margin-bottom: 5px;
+  }
+  .popover .who .mail { font-size: 12px; color: var(--muted); word-break: break-all; line-height: 1.5; }
+  .popover button {
+    display: flex; align-items: center; gap: 9px; width: 100%; text-align: left;
+    background: none; border: none; color: var(--text); font: inherit; font-size: 13px;
+    padding: 8px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .popover button:hover { background: var(--panel); }
+
+  /* ---------- エラー表示 ---------- */
+  .banner {
+    display: flex; align-items: flex-start; gap: 10px;
+    padding: 12px 14px; border-radius: 9px; margin-bottom: 18px;
+    font-size: 13px; line-height: 1.65;
+    background: rgba(210,153,34,.09); border: 1px solid rgba(210,153,34,.32); color: #f0d9a4;
+  }
+  .banner strong { color: #ffd479; }
+
+  .stale {
+    display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
+    font-size: 12px; color: var(--warn); font-variant-numeric: tabular-nums;
+  }
+  .stale .dot { background: var(--warn); }
+
+  .inline-error { text-align: center; padding: 80px 20px; color: var(--muted); }
+  .inline-error .mark {
+    width: 46px; height: 46px; border-radius: 50%; margin: 0 auto 16px;
+    background: rgba(248,81,73,.1); color: var(--danger);
+    display: grid; place-items: center; font-size: 21px;
+  }
+  .inline-error h4 { color: var(--text); margin: 0 0 8px; font-size: 15px; }
+  .inline-error p { margin: 0 0 20px; line-height: 1.7; font-size: 13px; }
+
+  .form-error {
+    display: flex; gap: 9px; padding: 11px 13px; border-radius: 8px; margin-bottom: 16px;
+    background: rgba(248,81,73,.09); border: 1px solid rgba(248,81,73,.3);
+    color: #ffb3ae; font-size: 12.5px; line-height: 1.65; text-align: left;
+  }
+  .row-error { color: var(--danger); font-size: 11.5px; margin-top: 5px; }
+  .empty-day {
+    display: grid; place-items: center; height: 60px; margin-top: 16px;
+    color: var(--muted); font-size: 12px;
+    border: 1px dashed var(--line); border-radius: 8px;
+  }
 </style>
 </head>
 <body>
@@ -287,10 +340,10 @@ const px = (seed, hour) => `<div class="shot" style="${shot(seed, hour)}">`;
 
 function badge(state) {
   const map = {
-    active:  ['ok',      '接続中'],
+    paired:  ['ok',      '接続中'],
     stale:   ['warn',    '応答なし'],
     pending: ['pending', 'ペアリング待ち'],
-    revoked: ['revoked', '切断済み'],
+    disconnected: ['disconnected', '切断済み'],
   };
   const [cls, label] = map[state];
   return `<span class="badge"><span class="dot ${cls}"></span>${label}</span>`;
@@ -298,8 +351,8 @@ function badge(state) {
 
 // ---------- 端末のダミーデータ ----------
 const DEVICES = [
-  { id: 'd1', name: '玄関',   state: 'active',  last: '2分前',  interval: '5分',  seed: 3, hour: 14 },
-  { id: 'd2', name: '裏庭',   state: 'active',  last: '4分前',  interval: '5分',  seed: 8, hour: 14 },
+  { id: 'd1', name: '玄関',   state: 'paired',  last: '2分前',  interval: '5分',  seed: 3, hour: 14 },
+  { id: 'd2', name: '裏庭',   state: 'paired',  last: '4分前',  interval: '5分',  seed: 8, hour: 14 },
   { id: 'd3', name: '駐車場', state: 'stale',   last: '3時間前', interval: '10分', seed: 1, hour: 21 },
 ];
 
@@ -319,7 +372,19 @@ function shell(page, content, extra = '') {
     ${extra}`;
 }
 
-function dashboard(devices) {
+function dashboard(devices, opt = {}) {
+  if (opt.error) {
+    return shell('dashboard', `
+      <div class="topbar"><h3>最新画像</h3></div>
+      <div class="content">
+        <div class="inline-error">
+          <div class="mark">!</div>
+          <h4>読み込めませんでした</h4>
+          <p>通信に失敗しました。しばらく待ってからもう一度お試しください。</p>
+          <button class="btn primary">再試行</button>
+        </div>
+      </div>`, opt.extra);
+  }
   if (!devices.length) {
     return shell('dashboard', `
       <div class="topbar"><h3>最新画像</h3></div>
@@ -329,12 +394,12 @@ function dashboard(devices) {
           <p>Android 端末に EdgeWatcher をインストールし、<br>QR コードを読み取らせるとここに画像が並びます。</p>
           <button class="btn primary">端末を追加</button>
         </div>
-      </div>`);
+      </div>`, opt.extra);
   }
   const cards = devices.map(d => {
     const body = `<div class="card-body"><span class="name">${d.name}</span>
         <span class="push">${badge(d.state)}</span></div>`;
-    if (d.state === 'pending' || d.state === 'revoked') {
+    if (d.state === 'pending' || d.state === 'disconnected') {
       const msg = d.state === 'pending'
         ? 'QR コードの読み取り待ち'
         : '切断済み。再ペアリングが必要です';
@@ -343,29 +408,53 @@ function dashboard(devices) {
     return `<div class="card">${px(d.seed, d.hour)}
         <span class="stamp">${d.last}</span></div>${body}</div>`;
   }).join('');
+  const stale = opt.stale
+    ? `<span class="stale"><span class="dot"></span>更新できていません(最終更新 14:32)</span>`
+    : '';
   return shell('dashboard', `
-    <div class="topbar"><h3>最新画像</h3><span class="count">${devices.length} 台</span></div>
-    <div class="content"><div class="grid">${cards}</div></div>`);
+    <div class="topbar"><h3>最新画像</h3><span class="count">${devices.length} 台</span>${stale}</div>
+    <div class="content"><div class="grid">${cards}</div></div>`, opt.extra);
 }
 
-function history() {
-  const cells = [0,1,2,3,4,5,6].map(i =>
-    `<div class="cell ${i === 3 ? 'sel' : ''}" style="${shot(i + 2, 12 + i)}"></div>`).join('');
-  return shell('dashboard', `
+function history(opt = {}) {
+  const head = `
     <div class="topbar">
       <button class="btn sm">← 戻る</button>
-      <h3>玄関</h3><span class="count">過去1週間</span>
-    </div>
+      <h3>玄関</h3><span class="count">直近24時間</span>
+    </div>`;
+
+  if (opt.error) {
+    return shell('dashboard', `${head}
+      <div class="content">
+        <div class="inline-error">
+          <div class="mark">!</div>
+          <h4>履歴を読み込めませんでした</h4>
+          <p>通信に失敗しました。しばらく待ってからもう一度お試しください。</p>
+          <button class="btn primary">再試行</button>
+        </div>
+      </div>`);
+  }
+
+  const cells = [0,1,2,3,4,5,6].map(i =>
+    `<div class="cell ${i === 3 ? 'sel' : ''}" style="${shot(i + 2, 12 + i)}"></div>`).join('');
+  const strip = opt.emptyDay
+    ? `<div class="empty-day">表示できる画像がありません</div>`
+    : `<div class="strip">${cells}</div>`;
+  const big = opt.emptyDay
+    ? `<div class="placeholder" style="aspect-ratio:4/3;border-radius:var(--radius)">この端末からは、直近24時間の画像が届いていません</div>`
+    : `<div class="big" style="${shot(3, 14)}"><span class="stamp">2026-08-20 14:35</span></div>`;
+
+  return shell('dashboard', `${head}
     <div class="content">
       <div class="viewer">
-        <div class="big" style="${shot(3, 14)}"><span class="stamp">2026-08-20 14:35</span></div>
+        ${big}
         <div class="transport">
           <button class="btn sm">▶</button>
           <div class="track"><div class="fill"></div><div class="knob"></div></div>
           <span class="num">最新へ</span>
         </div>
-        <div class="ticks"><span>8/16</span><span>8/17</span><span>8/18</span><span>8/19</span><span>8/20</span><span>今</span></div>
-        <div class="strip">${cells}</div>
+        <div class="ticks"><span>0:00</span><span>6:00</span><span>12:00</span><span>18:00</span><span>今</span></div>
+        ${strip}
       </div>
     </div>`);
 }
@@ -373,33 +462,65 @@ function history() {
 function deviceRow(d) {
   let action;
   if (d.pairing) action = `<button class="btn sm primary">QR を表示</button>`;
-  else if (d.state === 'revoked') action = `<button class="btn sm">再ペアリング</button>`;
+  else if (d.state === 'disconnected') action = `<button class="btn sm">再ペアリング</button>`;
   else if (d.state === 'pending') action = `<button class="btn sm primary">QR を表示</button>`;
   else action = `<button class="btn sm">セッション切断</button>`;
   const interval = d.state === 'pending'
     ? '<span class="num">—</span>'
     : `<select><option>5分</option><option>10分</option><option>15分</option></select>`;
+  const err = d.error ? `<div class="row-error">${d.error}</div>` : '';
   return `<tr>
     <td><strong>${d.name}</strong></td>
     <td>${badge(d.state)}</td>
     <td class="num">${d.last}</td>
-    <td>${interval}</td>
+    <td>${interval}${err}</td>
     <td><div class="row-actions">${action}<button class="kebab">⋮</button></div></td>
   </tr>`;
 }
 
-function deviceList(devices, extra = '') {
+const LIMIT = 10;
+
+function deviceList(devices, extra = '', opt = {}) {
+  const atLimit = devices.length >= LIMIT;
+  const banner = atLimit ? `
+    <div class="banner">
+      <span>⚠</span>
+      <div><strong>端末の上限(${LIMIT}台)に達しています。</strong><br>
+        新しい端末を追加するには、既存の端末を削除してください。
+        ペアリング待ちの端末も1台として数えます。</div>
+    </div>` : '';
   return shell('devices', `
     <div class="topbar">
-      <h3>端末一覧</h3><span class="count">${devices.length} 台</span>
-      <button class="btn primary push">端末を追加</button>
+      <h3>端末一覧</h3><span class="count">${devices.length} / ${LIMIT} 台</span>
+      <button class="btn primary push" ${atLimit ? 'disabled' : ''}>端末を追加</button>
     </div>
     <div class="content">
+      ${banner}
       <table>
         <thead><tr><th>端末名</th><th>状態</th><th>最終受信</th><th>送信間隔</th><th></th></tr></thead>
         <tbody>${devices.map(deviceRow).join('')}</tbody>
       </table>
     </div>`, extra);
+}
+
+// 上限に達した状態を見せるための、10台ぶんのダミー
+const FULL_DEVICES = [
+  ...DEVICES,
+  { id:'d4',  name:'物置',     state:'paired',  last:'1分前',  interval:'5分',  seed:2, hour:14 },
+  { id:'d5',  name:'倉庫',     state:'paired',  last:'6分前',  interval:'10分', seed:5, hour:14 },
+  { id:'d6',  name:'東側通路', state:'stale',   last:'2日前',  interval:'15分', seed:9, hour:20 },
+  { id:'d7',  name:'temp-01',  state:'pending', last:'—',      interval:'—' },
+  { id:'d8',  name:'temp-02',  state:'pending', last:'—',      interval:'—' },
+  { id:'d9',  name:'旧・玄関', state:'disconnected', last:'12日前', interval:'5分' },
+  { id:'d10', name:'ベランダ', state:'paired',  last:'3分前',  interval:'5分',  seed:6, hour:14 },
+];
+
+// ログアウトのポップオーバー(アバターの右上に開く)
+function logoutPopover() {
+  return `<div class="popover">
+    <div class="who"><div class="mail">pentyan0303@gmail.com</div></div>
+    <button>⇥ ログアウト</button>
+  </div>`;
 }
 
 // QR の見た目だけを模した SVG(実データではない)
@@ -446,12 +567,12 @@ const SCENARIOS = [
     render: () => dashboard([
       ...DEVICES,
       { id: 'd4', name: '物置', state: 'pending', last: '—', seed: 0, hour: 12 },
-      { id: 'd5', name: '倉庫', state: 'revoked', last: '5日前', seed: 0, hour: 12 },
+      { id: 'd5', name: '倉庫', state: 'disconnected', last: '5日前', seed: 0, hour: 12 },
     ]) },
 
   { group: '最新画像', id: 'history',
     title: '履歴(スクラバー)',
-    note: '中央に1枚を大きく表示し、下の時刻スライダーで移動する。再生ボタンでタイムラプス。5分間隔なら1週間で約2000枚になるため、取得は1日単位のページングで、スライダーが日付を跨いだ時点で追加ロードする。',
+    note: '中央に1枚を大きく表示し、下の時刻スライダーで移動する。再生ボタンでタイムラプス。対象期間は直近24時間で、画像の保持期間(1日)と揃えてある。5分間隔でも最大288枚なので、ページングせず1回のリクエストで全件を取得する。',
     render: () => history() },
 
   { group: '端末一覧', id: 'devices',
@@ -465,7 +586,7 @@ const SCENARIOS = [
     render: () => deviceList([
       ...DEVICES,
       { id: 'd4', name: '物置', state: 'pending', last: '—',     interval: '—', pairing: true },
-      { id: 'd5', name: '倉庫', state: 'revoked', last: '5日前', interval: '5分' },
+      { id: 'd5', name: '倉庫', state: 'disconnected', last: '5日前', interval: '5分' },
     ]) },
 
   { group: '端末一覧', id: 'menu',
@@ -531,8 +652,8 @@ const SCENARIOS = [
 
   { group: 'ペアリング', id: 'pair-done',
     title: '端末を追加 ④ 接続しました',
-    note: '端末がスキャンした時点でサーバは PairingSession を CONSUMED にし、Device を ACTIVE に更新する。この2つは TransactWriteItems の1コールで、条件が落ちれば両方とも書かれない。',
-    render: () => deviceList([...DEVICES, { id:'d4', name:'物置', state:'active', last:'たった今', interval:'5分' }],
+    note: '端末がスキャンした時点でサーバは PairingSession を CONSUMED にし、Device を PAIRED に更新する。この2つは TransactWriteItems の1コールで、条件が落ちれば両方とも書かれない。',
+    render: () => deviceList([...DEVICES, { id:'d4', name:'物置', state:'paired', last:'たった今', interval:'5分' }],
       modal(`
         <div class="success-mark">✓</div>
         <h4>「物置」が接続しました</h4>
@@ -544,7 +665,7 @@ const SCENARIOS = [
   { group: 'ペアリング', id: 'repair',
     title: '再ペアリング中',
     note: '切断済みの端末から [再ペアリング] を押した状態。deviceId が変わらないため、端末を初期化しても別の Android 端末に置き換えても、過去の画像履歴が同じ観測地点として繋がり続ける。',
-    render: () => deviceList([...DEVICES, { id:'d5', name:'倉庫', state:'revoked', last:'5日前', interval:'5分', pairing:true }],
+    render: () => deviceList([...DEVICES, { id:'d5', name:'倉庫', state:'disconnected', last:'5日前', interval:'5分', pairing:true }],
       modal(`
         <h4>「倉庫」を再ペアリング</h4>
         <p>新しい QR コードを発行しました。<br>過去の画像履歴はそのまま引き継がれます。</p>
@@ -553,6 +674,104 @@ const SCENARIOS = [
         <div class="actions" style="justify-content:center">
           <button class="btn">キャンセル</button>
         </div>`)) },
+
+  // ---------- アカウント(03-web.md §1.4.2) ----------
+  { group: 'アカウント', id: 'logout',
+    title: 'ログアウトのポップオーバー',
+    note: 'サイドバー最下部のアバターをクリックすると開く。中身はメールアドレスと「ログアウト」のみで、確認ダイアログは挟まない。ログアウトは破壊的操作ではなく、再ログインも Google のワンクリックで済むため。押すと ①Query キャッシュ破棄 ②トークン破棄 ③Cognito Hosted UI の /logout へリダイレクト、の順に実行する。③がないと Cognito のセッション Cookie が残り、直後に「Google で続行」を押すと無言で再ログインしてしまう。',
+    render: () => dashboard(DEVICES, { extra: logoutPopover() }) },
+
+  // ---------- 端末数の上限(03-web.md §1.9) ----------
+  { group: '上限', id: 'limit-reached',
+    title: '端末数の上限に達した',
+    note: 'カウンタを「10 / 10 台」で常時見せ、上限時は表の上に説明バナーを出したうえで「端末を追加」を無効化する。理由がバナーとして同じ画面に見えているので、無効化しても行き止まりにならない(ツールチップに理由を隠すとタッチデバイスから到達できない)。ペアリング待ちの端末も1台として数える — DynamoDB にレコードが存在し、QR 総当たりの母数にもなるため。',
+    render: () => deviceList(FULL_DEVICES) },
+
+  { group: '上限', id: 'limit-429',
+    title: '上限超過を送信時に受けた(429)',
+    note: '事前抑止をすり抜ける経路として、2つのタブで同時に追加操作を行った場合がある。この競合はサーバ側の 429 でしか検出できないため、ミューテーションのエラーとしてモーダル内に表示する。上限値は UI にハードコードせず、GET /devices のレスポンスに含めて返す。',
+    render: () => deviceList(FULL_DEVICES, modal(`
+      <h4>端末を追加できませんでした</h4>
+      <div class="form-error"><span>⚠</span>
+        <div>端末の上限(10台)に達しています。<br>別のタブで端末が追加された可能性があります。</div></div>
+      <p>追加するには、既存の端末を削除してください。</p>
+      <div class="actions">
+        <button class="btn">閉じる</button>
+        <button class="btn primary">端末一覧へ</button>
+      </div>`, 'left')) },
+
+  // ---------- エラー(03-web.md §1.10) ----------
+  { group: 'エラー', id: 'err-stale',
+    title: '60秒ポーリングの失敗',
+    note: 'この画面で最も重要なエラー挙動。既存の画像は消さず、トップバーに小さく「更新できていません(最終更新 14:32)」とだけ出す。「今の状態」を確認する定点観測の画面が、通信が一瞬切れるたびに空になるのが最も避けたい挙動であるため。古い画像でも撮影時刻が添えられていれば十分に役に立つ。回復はユーザー操作なしに次のポーリングで行われる。',
+    render: () => dashboard(DEVICES, { stale: true }) },
+
+  { group: 'エラー', id: 'err-initial',
+    title: '初回ロードの失敗',
+    note: '表示できるデータが何もない場合のみ、画面中央にエラーと [再試行] を出す。自動リトライは指数バックオフで最大2回まで(TanStack Query 既定の3回は、5分間隔でしか更新されないデータには過剰)。',
+    render: () => dashboard([], { error: true }) },
+
+  { group: 'エラー', id: 'err-history',
+    title: '履歴の読み込み失敗',
+    note: '履歴画面も同じ扱い。取得は1リクエストで完結するため、部分的に読めている状態は発生せず、画面中央にエラーと [再試行] を出すだけでよい。',
+    render: () => history({ error: true }) },
+
+  { group: 'エラー', id: 'err-empty-day',
+    title: '履歴 / 表示できる画像がない',
+    note: '端末が停電・圏外で止まっていた、あるいはペアリング直後でまだ1枚も届いていない場合。エラーではないが空状態として明示する。何も出さないとスライダーが壊れているように見えるため。なお保持期間が1日なので、24時間以上停止していた端末はこの状態になる。',
+    render: () => history({ emptyDay: true }) },
+
+  { group: 'エラー', id: 'err-notfound',
+    title: '端末が見つからない(403 / 404)',
+    note: '削除済みの端末の履歴 URL を直接開いた場合。ルート単位で受け止め、一覧へ戻る導線を出す。オーナー不一致(403)も同じ表示にする — 他人の deviceId の存在有無を、エラーの出し分けから推測されないようにするため。なお 401(認証切れ)はこの層まで来ない。HTTP クライアント層で捕まえてトークンを破棄し、戻り先パスを保持したまま /login へ送る。',
+    render: () => shell('dashboard', `
+      <div class="topbar"><button class="btn sm">← 戻る</button><h3>端末</h3></div>
+      <div class="content">
+        <div class="inline-error">
+          <div class="mark">?</div>
+          <h4>この端末は見つかりません</h4>
+          <p>削除されたか、アクセスする権限がありません。</p>
+          <button class="btn primary">端末一覧へ戻る</button>
+        </div>
+      </div>`) },
+
+  { group: 'エラー', id: 'err-rename',
+    title: '名前の変更に失敗',
+    note: 'ミューテーションの失敗は、操作の起点のすぐ近くに出す。モーダルは閉じず、入力値も保持する。ミューテーションは自動リトライしない — POST /devices が二重に走ると端末が2台できてしまうため、再試行はユーザーの明示的な操作に限る。',
+    render: () => deviceList(DEVICES, modal(`
+      <h4>名前の変更</h4>
+      <div class="form-error"><span>⚠</span>
+        <div>変更を保存できませんでした。通信状態を確認してもう一度お試しください。</div></div>
+      <div class="field">
+        <label>端末名</label>
+        <input value="玄関(北)">
+      </div>
+      <div class="actions">
+        <button class="btn">キャンセル</button>
+        <button class="btn primary">再試行</button>
+      </div>`, 'left')) },
+
+  { group: 'エラー', id: 'err-interval',
+    title: '送信間隔の変更に失敗',
+    note: '行内のセレクトで起こした操作なので、エラーもその行に出す。セレクトの値はサーバ側の実際の値(変更前)に戻す。楽観的更新のまま残すと、画面上は10分なのに端末は5分で送り続ける、という不一致が生まれる。',
+    render: () => deviceList([
+      DEVICES[0],
+      { ...DEVICES[1], error: '変更できませんでした。再試行してください。' },
+      DEVICES[2],
+    ]) },
+
+  { group: 'エラー', id: 'err-delete',
+    title: '削除に失敗',
+    note: '確認ダイアログ内に表示し、ダイアログは閉じない。閉じてしまうと、削除できたのか失敗したのかがユーザーに分からなくなる。',
+    render: () => deviceList(DEVICES, modal(`
+      <h4>「駐車場」を削除しますか?</h4>
+      <div class="form-error"><span>⚠</span>
+        <div>削除できませんでした。時間をおいてもう一度お試しください。</div></div>
+      <p>この端末の観測画像もすべて削除されます。取り消せません。</p>
+      <div class="actions">
+        <button class="btn">キャンセル</button>
+        <button class="btn danger">再試行</button>
+      </div>`, 'left')) },
 ];
 
 // ---------- 切り替え ----------

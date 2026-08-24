@@ -54,10 +54,13 @@ QR コードの向きは「Web が表示 → 端末がスキャン」。OTP に�
 [端末] QR をスキャン → POST /device/pair(認証不要)
       { pairingCode, deviceInfo: { model, osVersion, appVersion } }
    ▼
+[Lambda] GSI2 で pairingCode から PairingSession を逆引き
+      (GSI は結果整合。空振り時は端末が1秒間隔で最大3回リトライする)
+   ▼
 [Lambda] TransactWriteItems(1コール)
    - Update : PairingSession を PENDING → CONSUMED
               条件 = status が PENDING かつ expiresAt > now
-   - Update : Device を status=ACTIVE にし、deviceSecretHash と deviceInfo を設定
+   - Update : Device を status=PAIRED にし、deviceSecretHash と deviceInfo を設定
               条件 = 当該 deviceId のレコードが存在する
    │ { deviceId, deviceSecret }  ← deviceSecret を返すのはこの1回だけ
    ▼
@@ -82,7 +85,7 @@ Web の端末一覧にも「ペアリング待ち」の行が即座に現れる�
 「読んで、PENDING か確かめて、書く」という手順に分けると、同一 QR の同時スキャンで二重に発行されうる。
 そのため状態遷移は **`ConditionExpression` 付きの単一 Update** に畳み込み、
 `TransactWriteItems` で Device の更新と 1 コールにまとめる。条件が満たされなければ両方とも書かれないため、
-「QR は消費済みなのに端末が ACTIVE になっていない」という半端な状態が構造的に発生しない。
+「QR は消費済みなのに端末が PAIRED になっていない」という半端な状態が構造的に発生しない。
 
 ### 失効判定に TTL を使わない
 
@@ -131,8 +134,8 @@ Lambda のコールドスタートに KDF のコストを乗せる意味がな�
 トークンの先頭に `deviceId` を置いているのは、Authorizer が **`DEVICE#<deviceId>` への GetItem 1回**で
 次の4点をまとめて判定できるようにするため。
 
-1. 端末レコードが存在するか(= Web から削除されていないか)
-2. `status` が `ACTIVE` か
+1. 端末レコードが存在するか
+2. `status` が `PAIRED` か(`ARCHIVED` = 削除済みはここで落ちる)
 3. `sessionTokenHash` が一致するか
 4. `sessionExpiresAt` を過ぎていないか
 
@@ -148,6 +151,10 @@ Lambda のコールドスタートに KDF のコストを乗せる意味がな�
 キャッシュを切るのは、`00-overview.md` §5 が謳う「削除された瞬間、有効期限が残っている
 トークンでも即座に拒否される」という即時失効が、毎リクエストの GetItem に依存しているため。
 キャッシュを有効にすると、その TTL の間だけ削除済みの端末がアップロードを続けられてしまう。
+
+なお削除は論理削除(`status = ARCHIVED`)であり、レコードは物理削除まで残る。
+したがって即時失効を支えているのは**レコードの不在ではなく `status` の判定**である。
+Authorizer は「取得できたか」だけで通してはならず、必ず `status = PAIRED` を確認する。
 
 GetItem 1回のコストと引き換えに即時失効を取る、という明示的なトレードオフとして選択している。
 
@@ -173,13 +180,17 @@ Web からの操作が、端末側の後始末まで自動的に波及する。�
 
 ### 状態モデル
 
-`Device.status` は3値を取る。表示上の「応答なし」は `ACTIVE` からの派生であり、永続化しない。
+`Device.status` は4値を取る。表示上の「応答なし」は `PAIRED` からの派生であり、永続化しない。
 
 | `status` | 意味 | Web での表示 |
 | --- | --- | --- |
 | `PENDING` | 作成済みだがまだ一度もスキャンされていない | ペアリング待ち |
-| `ACTIVE` | 資格情報が有効 | 接続中 / 応答なし(最終受信時刻で派生) |
-| `REVOKED` | Web から資格情報を失効させた | 切断済み |
+| `PAIRED` | 資格情報が有効 | 接続中 / 応答なし(最終受信時刻で派生) |
+| `DISCONNECTED` | Web から資格情報を失効させた | 切断済み |
+| `ARCHIVED` | オーナーが削除した(論理削除) | 表示しない |
+
+遷移は `PENDING → PAIRED ⇄ DISCONNECTED` を基本とし、どの状態からも `ARCHIVED` に落ちる。
+`ARCHIVED` は終端であり、そこから戻る遷移は存在しない(再登録は新しい `deviceId` になる)。
 
 「Web から切断した端末」と「単に圏外・電源断の端末」を `status` で区別できるため、
 最終受信時刻の閾値だけで両者を推測する必要がない(`01-openquestion.md` AUTH-09)。
@@ -190,17 +201,23 @@ Web からの「セッション切断」で `sessionTokenHash` のみを消す�
 手元の `deviceSecret` を使って数秒で新しいセッションを取得してしまい、切断にならない。
 
 したがって切断は **`sessionTokenHash` と `deviceSecretHash` の両方を無効化し、
-`status` を `REVOKED` にする**操作と定義する。復帰には Web からの再ペアリングが必要になる。
+`status` を `DISCONNECTED` にする**操作と定義する。復帰には Web からの再ペアリングが必要になる。
 
 ### 3つの操作の違い
 
 | 操作 | 実行主体 | Device レコード | 画像履歴 | 復帰方法 |
 | --- | --- | --- | --- | --- |
-| セッション切断 | Web | 残る(`REVOKED`) | 残る | Web から再ペアリング |
-| ログアウト | 端末 | 残る(`REVOKED`) | 残る | Web から再ペアリング |
-| 削除 | Web のみ | 消える | 消える | なし(新規登録) |
+| セッション切断 | Web | 残る(`DISCONNECTED`) | 残る | Web から再ペアリング |
+| ログアウト | 端末 | 残る(`DISCONNECTED`) | 残る | Web から再ペアリング |
+| 削除 | Web のみ | `ARCHIVED` に更新し資格情報も失効。後日物理削除 | 後日物理削除 | なし(新規登録) |
 
-**ログアウトとセッション切断は、サーバ側の結果としては同じ**(資格情報を失効させ `REVOKED` にする)。
+削除で Device を物理削除しないのは、1端末あたり観測レコードが保持期間内に最大288件あり、
+`DELETE /devices/{id}` のリクエスト内で消しきるのが現実的でないため。`ARCHIVED` に落とした時点で
+Authorizer が拒否し、Web の一覧からも消えるため、**オーナーから見た挙動は物理削除と変わらない**。
+実体の削除は後日のスケジューリング処理にまとめる(`01-openquestion.md` DATA-02。
+処理自体は今回のスコープ外)。
+
+**ログアウトとセッション切断は、サーバ側の結果としては同じ**(資格情報を失効させ `DISCONNECTED` にする)。
 違いは実行主体だけである。端末側でログアウトするとローカルの `deviceSecret` は失われるため、
 サーバ側で `deviceSecret` を生かしておいても端末には復帰する手段がない。
 したがって `POST /device/logout` は `sessionTokenHash` と `deviceSecretHash` の両方を消し、
@@ -209,9 +226,9 @@ Web の一覧に「切断済み」として現れて [再ペアリング] ボタ
 端末からの削除は許可しない。屋外に常設された端末が物理的に触られただけで、
 オーナーの管理下からレコードごと消えてしまう事態を避けるため。
 
-オフライン中にログアウトされた場合、この呼び出しは失敗しサーバ側は `ACTIVE` のまま残る。
+オフライン中にログアウトされた場合、この呼び出しは失敗しサーバ側は `PAIRED` のまま残る。
 その端末は Web 上では「応答なし」として見え、オーナーが手動で [セッション切断] を押せば
-`REVOKED` に揃う。端末側は既にローカル資格情報を捨てているため、実害はない。
+`DISCONNECTED` に揃う。端末側は既にローカル資格情報を捨てているため、実害はない。
 
 ## 7. Web ユーザーの認証
 
