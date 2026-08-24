@@ -29,18 +29,18 @@ state を3層に分ける。
 
 | スタック | 持つもの | apply 頻度 | state の置き場 |
 | --- | --- | --- | --- |
-| `bootstrap` | tfstate 用 S3 バケット、ロック用 DynamoDB テーブル | ほぼ一度きり | 自分自身が作ったバケット |
+| `bootstrap` | tfstate 用 S3 バケット | ほぼ一度きり | 自分自身が作ったバケット |
 | `shared` | Route53 ホストゾーン、GitHub Actions 用 OIDC プロバイダと IAM ロール | 年数回 | `shared/terraform.tfstate` |
 | `envs/dev` | dev のアプリケーションリソース一式 | 機能追加のたび | `envs/dev/terraform.tfstate` |
 | `envs/prod` | prod のアプリケーションリソース一式 | 機能追加のたび | `envs/prod/terraform.tfstate` |
 
 ```text
-terraform/
+infra/
   bootstrap/
   shared/
   envs/
-    dev/     ( main.tf / terraform.tfvars / backend.tf )
-    prod/    ( main.tf / terraform.tfvars / backend.tf )
+    dev/     ( main.tf / iam.tf / variables.tf / outputs.tf / terraform.tfvars )
+    prod/
   modules/
     domain/
     cognito-web/
@@ -49,7 +49,28 @@ terraform/
     web-hosting/
     api/
     lambda/
+  placeholder/    ( 疎通確認用の index.html )
 ```
+
+### ロックに DynamoDB を使わない
+
+当初はロック用の DynamoDB テーブルも `bootstrap` に含める設計だったが、
+**Terraform 1.10 以降は S3 のネイティブロック(`use_lockfile = true`)が使える**ため不要。
+`bootstrap` は S3 バケット1つだけになる。管理するリソースが減り、
+「ロックテーブルだけ消えて apply が通らない」という事故の種も消える。
+
+### 未確定事項を optional 変数で切り離す
+
+`root_domain`(OPS-01)と `google_client_id`(AUTH-07)が未確定でも構築を止めないため、
+**これらを `null` 許容の変数にし、`count` で関連リソースの作成を切り替える**。
+
+| 変数 | `null` のとき |
+| --- | --- |
+| `root_domain` | Route53・ACM・カスタムドメインを作らない。CloudFront と API Gateway の既定ドメインで動作する |
+| `google_client_id` | Google IdP を作らない。User Pool と Hosted UI だけが立つ |
+
+確定したら値を埋めて apply するだけでよく、**コードの書き換えは発生しない**。
+同じ仕組みを2つの異なる外部依存に適用することで、扱い方が1つに揃う。
 
 ### `bootstrap` の鶏卵問題
 

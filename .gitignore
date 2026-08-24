@@ -1,0 +1,34 @@
+# Terraform
+**/.terraform/*
+*.tfstate
+*.tfstate.*
+crash.log
+crash.*.log
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+.terraformrc
+terraform.rc
+tfplan
+*.tfplan
+
+# lock ファイルはコミットする(provider のバージョンを固定するため)
+!.terraform.lock.hcl
+
+# モジュールがビルドするダミー zip
+infra/modules/lambda/.build/
+
+# シークレットを含みうるファイル
+*.auto.tfvars
+secrets.tfvars
+
+# Web / Node
+web/node_modules/
+web/dist/
+web/.env.local
+web/.env.*.local
+*.tsbuildinfo
+
+# macOS
+.DS_Store

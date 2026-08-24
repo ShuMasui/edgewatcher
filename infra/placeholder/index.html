@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EdgeWatcher — インフラ疎通確認</title>
+<style>
+  :root { color-scheme: dark; }
+  body {
+    margin: 0; min-height: 100vh; display: grid; place-items: center;
+    background: #0e1116; color: #e6edf3;
+    font-family: "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+    padding: 24px;
+  }
+  .card {
+    max-width: 560px; width: 100%;
+    background: #161b23; border: 1px solid #2a323f; border-radius: 14px;
+    padding: 32px;
+  }
+  .mark {
+    width: 40px; height: 40px; border-radius: 11px; margin-bottom: 20px;
+    background: linear-gradient(135deg, #f0b429, #c2410c);
+  }
+  h1 { margin: 0 0 6px; font-size: 20px; }
+  .sub { margin: 0 0 24px; color: #8b98a9; font-size: 13px; line-height: 1.7; }
+  .ok {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: rgba(63,185,80,.12); border: 1px solid rgba(63,185,80,.32);
+    color: #7ee787; border-radius: 8px; padding: 9px 13px;
+    font-size: 13px; margin-bottom: 24px;
+  }
+  ul { margin: 0; padding-left: 20px; color: #8b98a9; font-size: 13px; line-height: 1.9; }
+  ul b { color: #e6edf3; font-weight: 600; }
+  .foot {
+    margin-top: 24px; padding-top: 18px; border-top: 1px solid #2a323f;
+    color: #6e7b8c; font-size: 11.5px; line-height: 1.7;
+  }
+  code { background: #0e1116; padding: 1px 5px; border-radius: 4px; font-size: 11.5px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <div class="mark"></div>
+    <h1>EdgeWatcher</h1>
+    <p class="sub">余っている Android 端末を、対候性を持つエッジ定点観測デバイスとして活用するプロジェクト。</p>
+
+    <div class="ok"><span>✓</span> CloudFront からの配信が動作しています</div>
+
+    <ul>
+      <li><b>CloudFront + OAC</b> — S3 は非公開のまま、この HTML が配信されている</li>
+      <li><b>SPA フォールバック</b> — 存在しないパスを開いてもこのページが返る</li>
+      <li><b>HTTPS</b> — CloudFront 側で終端されている</li>
+    </ul>
+
+    <p class="foot">
+      これはインフラの疎通確認用のプレースホルダです。<br>
+      React + Vite でビルドした本物の Web アプリが、CI によってこの
+      <code>index.html</code> を上書きします。<br>
+      設計: <code>docs/03-web.md</code> / <code>docs/02-infra.md</code>
+    </p>
+  </div>
+</body>
+</html>
