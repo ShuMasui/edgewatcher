@@ -300,6 +300,21 @@
     color: #ffb3ae; font-size: 12.5px; line-height: 1.65; text-align: left;
   }
   .row-error { color: var(--danger); font-size: 11.5px; margin-top: 5px; }
+  .datenav {
+    display: inline-flex; align-items: center; gap: 4px; margin-left: auto;
+  }
+  .datenav .day {
+    font-variant-numeric: tabular-nums; font-size: 13px; min-width: 92px; text-align: center;
+  }
+  .datenav .arrow {
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text);
+    width: 26px; height: 26px; border-radius: 7px; cursor: pointer; font: inherit; line-height: 1;
+  }
+  .datenav .arrow:hover:not([disabled]) { border-color: var(--muted); }
+  .datenav .arrow[disabled] { opacity: .35; cursor: not-allowed; }
+  .retention-note {
+    margin-top: 12px; text-align: center; color: var(--muted); font-size: 11.5px;
+  }
   .empty-day {
     display: grid; place-items: center; height: 60px; margin-top: 16px;
     color: var(--muted); font-size: 12px;
@@ -417,10 +432,16 @@ function dashboard(devices, opt = {}) {
 }
 
 function history(opt = {}) {
+  const day = opt.day || '8/24 (今日)';
   const head = `
     <div class="topbar">
       <button class="btn sm">← 戻る</button>
-      <h3>玄関</h3><span class="count">直近24時間</span>
+      <h3>玄関</h3>
+      <div class="datenav">
+        <button class="arrow" ${opt.atOldest ? 'disabled' : ''}>&lsaquo;</button>
+        <span class="day">${day}</span>
+        <button class="arrow" ${opt.atNewest === false ? '' : 'disabled'}>&rsaquo;</button>
+      </div>
     </div>`;
 
   if (opt.error) {
@@ -441,7 +462,7 @@ function history(opt = {}) {
     ? `<div class="empty-day">表示できる画像がありません</div>`
     : `<div class="strip">${cells}</div>`;
   const big = opt.emptyDay
-    ? `<div class="placeholder" style="aspect-ratio:4/3;border-radius:var(--radius)">この端末からは、直近24時間の画像が届いていません</div>`
+    ? `<div class="placeholder" style="aspect-ratio:4/3;border-radius:var(--radius)">この日、この端末からは画像が届いていません</div>`
     : `<div class="big" style="${shot(3, 14)}"><span class="stamp">2026-08-20 14:35</span></div>`;
 
   return shell('dashboard', `${head}
@@ -455,6 +476,7 @@ function history(opt = {}) {
         </div>
         <div class="ticks"><span>0:00</span><span>6:00</span><span>12:00</span><span>18:00</span><span>今</span></div>
         ${strip}
+        ${opt.atOldest ? '<div class="retention-note">これより前の画像は保持期間(7日)を過ぎています</div>' : ''}
       </div>
     </div>`);
 }
@@ -572,7 +594,7 @@ const SCENARIOS = [
 
   { group: '最新画像', id: 'history',
     title: '履歴(スクラバー)',
-    note: '中央に1枚を大きく表示し、下の時刻スライダーで移動する。再生ボタンでタイムラプス。対象期間は直近24時間で、画像の保持期間(1日)と揃えてある。5分間隔でも最大288枚なので、ページングせず1回のリクエストで全件を取得する。',
+    note: 'スライダーが扱うのは常に1日分(5分間隔で最大288枚)。過去に遡るのは右上の日付ナビで行う。保持期間ぶんを1本のスライダーに載せると、prod の7日は2016コマになって1コマ1px未満になり、目的の時刻に合わせられないため。1日単位なら取得も常に1リクエストで済む。',
     render: () => history() },
 
   { group: '端末一覧', id: 'devices',
@@ -718,8 +740,13 @@ const SCENARIOS = [
 
   { group: 'エラー', id: 'err-empty-day',
     title: '履歴 / 表示できる画像がない',
-    note: '端末が停電・圏外で止まっていた、あるいはペアリング直後でまだ1枚も届いていない場合。エラーではないが空状態として明示する。何も出さないとスライダーが壊れているように見えるため。なお保持期間が1日なので、24時間以上停止していた端末はこの状態になる。',
-    render: () => history({ emptyDay: true }) },
+    note: 'その日、端末が停電・圏外で止まっていた場合。エラーではないが空状態として明示する。何も出さないとスライダーが壊れているように見えるため。',
+    render: () => history({ emptyDay: true, day: '8/21 (水)', atNewest: false }) },
+
+  { group: 'エラー', id: 'err-oldest',
+    title: '履歴 / これ以上遡れない',
+    note: '保持期間の最も古い日まで来た状態。‹ を無効化し、理由を下に添える。遡れる日数はサーバが返す retentionDays で決まり(dev は当日のみ、prod は7日)、UI にはハードコードしない — 端末数上限を limit として返すのと同じ理由。下限は retentionDays から計算した固定値とし、実際にデータが残っているかどうかでは変えない(TTL とライフサイクルはどちらも遅延削除のため、残っている量は日によって揺れる)。',
+    render: () => history({ day: '8/18 (日)', atOldest: true, atNewest: false }) },
 
   { group: 'エラー', id: 'err-notfound',
     title: '端末が見つからない(403 / 404)',

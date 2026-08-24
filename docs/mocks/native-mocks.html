@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>EdgeWatcher Android モック</title>
+<style>
+  :root {
+    --bg: #0e1116;
+    --panel: #161b23;
+    --panel-2: #1d232d;
+    --line: #2a323f;
+    --text: #e6edf3;
+    --muted: #8b98a9;
+    --accent: #f0b429;
+    --ok: #3fb950;
+    --warn: #d29922;
+    --danger: #f85149;
+    font-synthesis-weight: none;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; }
+  body {
+    background: var(--bg); color: var(--text);
+    font-family: "Hiragino Sans", "Yu Gothic UI", system-ui, -apple-system, sans-serif;
+    display: grid; grid-template-columns: 300px 1fr; font-size: 14px;
+  }
+
+  /* ---------- 外枠 ---------- */
+  .chrome { background: #0a0d12; border-right: 1px solid var(--line); overflow-y: auto; padding: 20px 16px 40px; }
+  .chrome h1 {
+    font-size: 13px; letter-spacing: .12em; text-transform: uppercase;
+    color: var(--accent); margin: 0 0 4px;
+  }
+  .chrome .sub { color: var(--muted); font-size: 12px; margin: 0 0 22px; line-height: 1.6; }
+  .group-label { font-size: 11px; color: var(--muted); letter-spacing: .08em; margin: 16px 0 6px; padding-left: 8px; }
+  .scenario {
+    display: block; width: 100%; text-align: left; background: transparent;
+    border: 1px solid transparent; color: var(--text); padding: 8px 10px;
+    border-radius: 8px; font: inherit; cursor: pointer; margin-bottom: 2px; line-height: 1.4;
+  }
+  .scenario:hover { background: var(--panel); }
+  .scenario[aria-current="true"] { background: var(--panel-2); border-color: var(--accent); }
+
+  .stage { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+  .stage-head { padding: 16px 24px; border-bottom: 1px solid var(--line); background: #0a0d12; }
+  .stage-head h2 { margin: 0 0 4px; font-size: 15px; }
+  .stage-head p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; max-width: 88ch; }
+  .viewport {
+    flex: 1; overflow: auto; padding: 28px; background: #070a0e;
+    display: flex; gap: 28px; align-items: flex-start; justify-content: center;
+  }
+
+  /* ---------- 端末フレーム ---------- */
+  .phone {
+    width: 320px; height: 660px; flex-shrink: 0;
+    background: var(--bg); border: 1px solid var(--line); border-radius: 30px;
+    box-shadow: 0 24px 60px rgba(0,0,0,.55); overflow: hidden;
+    display: flex; flex-direction: column; position: relative;
+  }
+  .statusbar {
+    height: 26px; flex-shrink: 0; display: flex; align-items: center;
+    justify-content: space-between; padding: 0 16px; font-size: 10px; color: var(--muted);
+    font-variant-numeric: tabular-nums;
+  }
+  .screen { flex: 1; display: flex; flex-direction: column; min-height: 0; }
+
+  /* 通知シェード */
+  .shade { width: 320px; flex-shrink: 0; }
+  .shade-label { font-size: 11px; color: var(--muted); margin-bottom: 8px; letter-spacing: .06em; }
+  .notif {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    padding: 12px 14px; margin-bottom: 10px;
+  }
+  .notif .app { font-size: 10px; color: var(--muted); margin-bottom: 5px; letter-spacing: .04em; }
+  .notif .title { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+  .notif .body { font-size: 12px; color: var(--muted); line-height: 1.55; }
+  .notif.high { border-color: rgba(248,81,73,.45); background: rgba(248,81,73,.07); }
+
+  /* ---------- 画面の部品 ---------- */
+  .appbar {
+    padding: 14px 18px 12px; display: flex; align-items: center; gap: 10px;
+    border-bottom: 1px solid var(--line); flex-shrink: 0;
+  }
+  .appbar .mark { width: 22px; height: 22px; border-radius: 6px; background: linear-gradient(135deg, var(--accent), #c2410c); }
+  .appbar h3 { margin: 0; font-size: 14px; }
+
+  .body { flex: 1; padding: 18px; overflow: auto; display: flex; flex-direction: column; }
+  .body.center { align-items: center; justify-content: center; text-align: center; }
+
+  .btn {
+    font: inherit; font-size: 13px; padding: 11px 16px; border-radius: 10px; cursor: pointer;
+    border: 1px solid var(--line); background: var(--panel-2); color: var(--text); width: 100%;
+  }
+  .btn.primary { background: var(--accent); color: #1b1300; border-color: var(--accent); font-weight: 600; }
+  .btn.danger { color: var(--danger); }
+  .btn.ghost { background: transparent; }
+  .btn + .btn { margin-top: 9px; }
+
+  .shot {
+    width: 100%; aspect-ratio: 3/4; border-radius: 12px; position: relative;
+    overflow: hidden; flex-shrink: 0;
+  }
+  .shot .stamp {
+    position: absolute; left: 10px; bottom: 10px; background: rgba(0,0,0,.66);
+    padding: 3px 9px; border-radius: 6px; font-size: 11px; font-variant-numeric: tabular-nums;
+  }
+  .shot .live {
+    position: absolute; right: 10px; top: 10px; background: rgba(248,81,73,.92);
+    padding: 3px 9px; border-radius: 6px; font-size: 10px; font-weight: 700; letter-spacing: .08em;
+  }
+  .reticle { position: absolute; inset: 14px; border: 1px solid rgba(255,255,255,.35); border-radius: 6px; }
+  .reticle::before, .reticle::after {
+    content: ''; position: absolute; background: rgba(255,255,255,.28);
+  }
+  .reticle::before { left: 33.3%; right: 33.3%; top: 0; bottom: 0; border-left: 1px solid rgba(255,255,255,.28); border-right: 1px solid rgba(255,255,255,.28); }
+  .reticle::after { top: 33.3%; bottom: 33.3%; left: 0; right: 0; border-top: 1px solid rgba(255,255,255,.28); border-bottom: 1px solid rgba(255,255,255,.28); }
+
+  .status {
+    display: flex; align-items: center; gap: 9px; margin: 14px 0 4px;
+    padding: 11px 13px; border-radius: 10px; background: var(--panel); border: 1px solid var(--line);
+  }
+  .status .dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .status .dot.ok { background: var(--ok); box-shadow: 0 0 0 3px rgba(63,185,80,.16); }
+  .status .dot.warn { background: var(--warn); }
+  .status .dot.off { background: var(--danger); }
+  .status .t { font-size: 12.5px; font-weight: 600; }
+  .status .s { font-size: 11px; color: var(--muted); margin-top: 2px; font-variant-numeric: tabular-nums; }
+
+  .spacer { flex: 1; min-height: 12px; }
+
+  .account {
+    border-top: 1px solid var(--line); padding-top: 13px; margin-top: 13px;
+    font-size: 11.5px; color: var(--muted); line-height: 1.6; word-break: break-all;
+  }
+  .account b { color: var(--text); font-weight: 600; }
+
+  /* QR スキャナ */
+  .scanner { flex: 1; position: relative; background: #05070a; display: grid; place-items: center; }
+  .scanner .frame-box {
+    width: 190px; height: 190px; border-radius: 16px; position: relative;
+  }
+  .scanner .frame-box span {
+    position: absolute; width: 30px; height: 30px; border: 3px solid var(--accent);
+  }
+  .scanner .frame-box span:nth-child(1) { top: 0; left: 0; border-right: 0; border-bottom: 0; border-radius: 12px 0 0 0; }
+  .scanner .frame-box span:nth-child(2) { top: 0; right: 0; border-left: 0; border-bottom: 0; border-radius: 0 12px 0 0; }
+  .scanner .frame-box span:nth-child(3) { bottom: 0; left: 0; border-right: 0; border-top: 0; border-radius: 0 0 0 12px; }
+  .scanner .frame-box span:nth-child(4) { bottom: 0; right: 0; border-left: 0; border-top: 0; border-radius: 0 0 12px 0; }
+  .scanner .hint {
+    position: absolute; left: 22px; right: 22px; bottom: 30px; text-align: center;
+    color: var(--muted); font-size: 12px; line-height: 1.65;
+  }
+  .scanner .hint b { color: var(--text); display: block; margin-bottom: 5px; font-size: 13px; }
+
+  .banner {
+    margin: 14px 18px 0; padding: 11px 13px; border-radius: 10px; font-size: 12px; line-height: 1.6;
+    display: flex; gap: 9px;
+  }
+  .banner.warn { background: rgba(210,153,34,.1); border: 1px solid rgba(210,153,34,.34); color: #f0d9a4; }
+  .banner.err { background: rgba(248,81,73,.1); border: 1px solid rgba(248,81,73,.34); color: #ffb3ae; }
+
+  .perm { text-align: left; width: 100%; }
+  .perm .row {
+    display: flex; gap: 11px; align-items: flex-start; padding: 12px 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .perm .row .ico { font-size: 17px; width: 22px; text-align: center; flex-shrink: 0; }
+  .perm .row .n { font-size: 13px; font-weight: 600; margin-bottom: 3px; }
+  .perm .row .d { font-size: 11.5px; color: var(--muted); line-height: 1.55; }
+
+  .sheet {
+    position: absolute; inset: 0; background: rgba(4,6,10,.72);
+    display: flex; align-items: flex-end;
+  }
+  .sheet .inner {
+    width: 100%; background: var(--panel); border-top: 1px solid var(--line);
+    border-radius: 18px 18px 0 0; padding: 20px 18px 22px;
+  }
+  .sheet h4 { margin: 0 0 8px; font-size: 15px; }
+  .sheet p { margin: 0 0 18px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+
+  .spin {
+    width: 34px; height: 34px; border-radius: 50%; margin: 0 auto 16px;
+    border: 3px solid var(--line); border-top-color: var(--accent);
+    animation: sp 1s linear infinite;
+  }
+  @keyframes sp { to { transform: rotate(360deg); } }
+  .big-msg h4 { margin: 0 0 8px; font-size: 15px; }
+  .big-msg p { margin: 0 0 20px; font-size: 12.5px; color: var(--muted); line-height: 1.7; }
+  .mark-ok {
+    width: 50px; height: 50px; border-radius: 50%; margin: 0 auto 16px;
+    background: rgba(63,185,80,.13); color: var(--ok);
+    display: grid; place-items: center; font-size: 24px;
+  }
+  .mark-err {
+    width: 50px; height: 50px; border-radius: 50%; margin: 0 auto 16px;
+    background: rgba(248,81,73,.12); color: var(--danger);
+    display: grid; place-items: center; font-size: 22px;
+  }
+</style>
+</head>
+<body>
+
+<nav class="chrome">
+  <h1>EdgeWatcher Native</h1>
+  <p class="sub">Android アプリのモック。<br>状況を選ぶと、その状態の画面に切り替わります。<br>設計: <code>docs/04-native.md</code></p>
+  <div id="scenarios"></div>
+</nav>
+
+<div class="stage">
+  <div class="stage-head">
+    <h2 id="sc-title"></h2>
+    <p id="sc-note"></p>
+  </div>
+  <div class="viewport">
+    <div class="phone">
+      <div class="statusbar"><span>14:35</span><span>▮▮▮ ▾ 87%</span></div>
+      <div class="screen" id="screen"></div>
+    </div>
+    <div class="shade" id="shade"></div>
+  </div>
+</div>
+
+<script>
+// ---------- ダミーの「写真」 ----------
+function shot(seed, hour) {
+  const day = hour >= 6 && hour < 18;
+  const sky = day
+    ? `linear-gradient(#7fa8cd ${20 + (seed % 7)}%, #b9cfe0 55%)`
+    : `linear-gradient(#141c2b ${20 + (seed % 7)}%, #2b3242 55%)`;
+  const ground = day ? '#3f4a37' : '#1a1f1a';
+  return `background: linear-gradient(transparent 0 62%, ${ground} 62% 100%), ${sky};`;
+}
+
+function appbar() {
+  return `<div class="appbar"><div class="mark"></div><h3>EdgeWatcher</h3></div>`;
+}
+
+// ---------- 稼働画面 ----------
+// 通常時は画像を一切出さない。表示するのは状態1行 + トグル + ログアウトのみ。
+function running(opt = {}) {
+  const st = opt.status || 'ok';
+  const map = {
+    ok:      ['ok',   '観測中',    '最終送信 14:32 ・ 5分間隔'],
+    offline: ['warn', 'オフライン', '12件待機中 ・ 最終送信 11:48'],
+    stopped: ['off',  '停止中',    '観測は行われていません'],
+  };
+  const [dot, title, sub] = map[st];
+
+  // ライブプレビューのときだけ画像領域が現れる
+  const preview = opt.live
+    ? `<div class="shot" style="${shot(4, 14)}"><div class="reticle"></div><span class="live">LIVE</span></div>`
+    : '';
+
+  let actions;
+  if (st === 'stopped') {
+    // 停止中だけ [観測を再開] を出す。Android 14+ では再起動後に
+    // 自動復帰できないため、この操作がないと再開手段がなくなる。
+    actions = `<button class="btn primary">観測を再開</button>`;
+  } else if (opt.live) {
+    actions = `<button class="btn primary">通常表示に戻す</button>`;
+  } else {
+    actions = `<button class="btn">画角を合わせる</button>`;
+  }
+
+  return `${appbar()}
+    ${opt.banner || ''}
+    <div class="body">
+      ${preview}
+      <div class="status" ${opt.live ? '' : 'style="margin-top:0"'}>
+        <span class="dot ${dot}"></span>
+        <div><div class="t">${title}</div><div class="s">${sub}</div></div>
+      </div>
+      ${actions}
+      <div class="spacer"></div>
+      <button class="btn ghost danger">ログアウト</button>
+    </div>
+    ${opt.sheet || ''}`;
+}
+
+// ---------- QR スキャナ ----------
+function scanner(opt = {}) {
+  return `${appbar()}
+    ${opt.banner || ''}
+    <div class="scanner">
+      <div class="frame-box"><span></span><span></span><span></span><span></span></div>
+      <div class="hint"><b>QR コードを読み取ってください</b>
+        EdgeWatcher の Web 画面で「端末を追加」を<br>押すと QR が表示されます。</div>
+    </div>
+    ${opt.sheet || ''}`;
+}
+
+function sheet(inner) { return `<div class="sheet"><div class="inner">${inner}</div></div>`; }
+function notif(title, body, cls = '') {
+  return `<div class="notif ${cls}"><div class="app">EdgeWatcher</div>
+    <div class="title">${title}</div><div class="body">${body}</div></div>`;
+}
+
+// ---------- シナリオ ----------
+const SCENARIOS = [
+  { group: '初回起動', id: 'perm',
+    title: '権限のリクエスト',
+    note: 'QR スキャナに入る前に権限を通す。ACCESS_BACKGROUND_LOCATION は要求しない — Foreground Service の location タイプが「使用中」を成立させるため不要で、要求すると Play の審査で背景位置情報の正当化が必要になる。',
+    render: () => `${appbar()}
+      <div class="body">
+        <div class="big-msg" style="text-align:left">
+          <h4>観測に必要な権限</h4>
+          <p>この端末を定点観測デバイスとして動かすために、以下を許可してください。</p>
+        </div>
+        <div class="perm">
+          <div class="row"><span class="ico">◉</span><div><div class="n">カメラ</div>
+            <div class="d">定期的に撮影します</div></div></div>
+          <div class="row"><span class="ico">⌖</span><div><div class="n">位置情報</div>
+            <div class="d">観測地点を記録します。バックグラウンドでの位置情報は要求しません</div></div></div>
+          <div class="row"><span class="ico">▤</span><div><div class="n">通知</div>
+            <div class="d">観測中であることを常に表示します</div></div></div>
+        </div>
+        <div class="spacer"></div>
+        <button class="btn primary">許可する</button>
+      </div>` },
+
+  { group: '初回起動', id: 'perm-denied',
+    title: '権限が拒否された',
+    note: 'カメラか位置情報が欠けた時点でこのアプリの目的が成立しないため、権限なしで動く縮退モードは持たない。設定への導線だけを出す。',
+    render: () => `${appbar()}
+      <div class="body center">
+        <div class="big-msg">
+          <div class="mark-err">!</div>
+          <h4>カメラの権限がありません</h4>
+          <p>EdgeWatcher はカメラと位置情報がないと<br>観測を行えません。<br>設定から許可してください。</p>
+          <button class="btn primary">設定を開く</button>
+        </div>
+      </div>` },
+
+  { group: 'ペアリング', id: 'scan',
+    title: 'QR スキャナ(未ペアリング)',
+    note: '未ペアリング時はこの画面のみ。設定項目も履歴も持たない。QR のペイロードは "ew1:<pairingCode>" で、deviceId は含まない。',
+    render: () => scanner() },
+
+  { group: 'ペアリング', id: 'pairing',
+    title: 'ペアリング処理中',
+    note: 'pairingCode の逆引きは GSI2 を経由し、GSI は結果整合。QR 発行直後は伝播が間に合わないことがあるため、1秒間隔で最大3回リトライしてから失敗と判断する。',
+    render: () => scanner({ sheet: sheet(`
+      <div style="text-align:center">
+        <div class="spin"></div>
+        <h4>接続しています…</h4>
+        <p>サーバーに問い合わせています。</p>
+      </div>`) }) },
+
+  { group: 'ペアリング', id: 'pair-invalid',
+    title: '無効な QR',
+    note: '「待てば解決する空振り(GSI の伝播待ち)」とは区別する。こちらはサーバが期限切れ・消費済みを明示的に返した場合で、リトライしても解決しないため即座にこの表示にする。',
+    render: () => scanner({ sheet: sheet(`
+      <div style="text-align:center">
+        <div class="mark-err">✕</div>
+        <h4>この QR コードは使えません</h4>
+        <p>有効期限が切れているか、すでに使用済みです。<br>Web 画面で QR を再発行してください。</p>
+        <button class="btn primary">もう一度スキャン</button>
+      </div>`) }) },
+
+  { group: 'ペアリング', id: 'paired',
+    title: '接続しました',
+    note: 'deviceSecret を EncryptedSharedPreferences に保存し、セッショントークンを取得して Foreground Service を開始した直後。',
+    render: () => scanner({ sheet: sheet(`
+      <div style="text-align:center">
+        <div class="mark-ok">✓</div>
+        <h4>「玄関」として接続しました</h4>
+        <p>観測を開始します。<br>この画面は閉じてかまいません。</p>
+        <button class="btn primary">はじめる</button>
+      </div>`) }) },
+
+  { group: 'ペアリング', id: 'battery',
+    title: 'バッテリー最適化の除外を促す',
+    note: '権限とは別枠。メーカー独自の省電力機構が Foreground Service を停止させることが実際に多く、これを案内しないと「なぜか止まる」の主要因になる。ペアリング直後に一度だけ案内し、強制はしない。',
+    render: () => running({ sheet: sheet(`
+      <h4>電池の最適化を解除してください</h4>
+      <p>端末の省電力機能によって観測が止まることがあります。
+         EdgeWatcher を最適化の対象から外すと、安定して動作します。</p>
+      <button class="btn primary">設定を開く</button>
+      <button class="btn ghost">あとで</button>`) }) },
+
+  { group: '稼働中', id: 'running',
+    title: '観測中(通常)',
+    note: '通常時は画像を一切表示しない。観測画像を見る場所は Web に一本化する — 端末側に出すと、保持期間・署名付きURL・履歴といった閲覧の仕組みが端末側にも滲み出してくる。端末の責務は「送ること」であり「見せること」ではない。画面に置くのは状態1行とボタン2つだけ。',
+    render: () => running() },
+
+  { group: '稼働中', id: 'live',
+    title: 'ライブプレビュー(トグル ON)',
+    note: '[画角を合わせる] でライブに切り替わり、もう一度押すと戻る。画像領域が現れるのはこのときだけ — 閲覧ではなく設置作業のための道具だから。プレビュー中も定期送信は止まらない。カメラの所有権は Foreground Service が持ち、画面はプレビュー用の Surface を渡すだけなので、同じセッションから撮影できる。',
+    render: () => running({ live: true }) },
+
+  { group: '稼働中', id: 'offline',
+    title: 'オフライン(送信待ち)',
+    note: '画面を見ただけでは通信の成否が分からないため、待機件数を明示する。屋外設置後にオーナーが端末を見に行く動機のほとんどが「本当に送れているのか」の確認であり、その答えを最初に出す。撮影自体は止めず、バッファに積む。',
+    render: () => running({ status: 'offline' }) },
+
+  { group: '稼働中', id: 'buffer-full',
+    title: 'バッファが上限に達した',
+    note: '288件(5分間隔で24時間相当)または 500MB のいずれか先に達したら古いものから削除する。保持期間より長くバッファしても、観測レコードの TTL は capturedAt 基準で決まるため、送った時点で期限切れになりうる。',
+    render: () => running({ status: 'offline', banner: `<div class="banner warn"><span>⚠</span>
+      <div>保存できる上限に達したため、古い画像から削除しています。</div></div>` }) },
+
+  { group: '復帰と切断', id: 'stopped',
+    title: '観測停止中(再起動後 / Android 14+)',
+    note: 'Android 14 以降はバックグラウンドから camera タイプの Foreground Service を開始できないため、BOOT_COMPLETED からの自動復帰が原理的に不可能。通知を出してタップで再開させる。Android 13 以下では自動復帰するのでこの画面は出ない。この状態だけ [観測を再開] を出す — これがないとアプリから再開する手段がなくなるため。',
+    render: () => running({ status: 'stopped' }),
+    shade: () => notif('EdgeWatcher が停止しています',
+      'タップして観測を再開してください。端末の再起動後は自動で再開できません。', 'high') },
+
+  { group: '復帰と切断', id: 'revoked',
+    title: 'Web から切断された(401)',
+    note: 'deviceSecret が無効になると資格情報を破棄して未ペアリング画面へ戻る。黙って QR スキャナに戻すと、オーナーには端末の故障と区別がつかないため、戻された理由を画面上に残す。',
+    render: () => scanner({ banner: `<div class="banner err"><span>⚠</span>
+      <div>この端末は接続を解除されました。<br>再度ペアリングしてください。</div></div>` }) },
+
+  { group: '復帰と切断', id: 'logout',
+    title: 'ログアウトの確認',
+    note: 'Web のログアウトは確認を挟まないが、端末側は挟む。Web は再ログインが Google のワンクリックで済むのに対し、端末は deviceSecret を失うため、復帰には Web から QR を再発行して物理的に端末を操作し直す必要があるため。端末からの「削除」は提供しない。',
+    render: () => running({ sheet: sheet(`
+      <h4>ログアウトしますか?</h4>
+      <p>この端末の接続を解除します。観測は停止します。<br>
+         再開するには、Web 画面で QR コードを再発行して<br>もう一度読み取らせる必要があります。</p>
+      <button class="btn danger">ログアウトする</button>
+      <button class="btn ghost">キャンセル</button>`) }) },
+
+  { group: '通知', id: 'notif-normal',
+    title: '常駐通知(観測中)',
+    note: 'Foreground Service には常駐通知が必須。専用ハードウェアとして常時稼働させる前提のため、通知が出続けることは許容する。画面と同じ情報を出し、端末を持ち上げなくても状態が分かるようにする。なお画面 OFF 中もこの通知は残るが、Foreground Service は CPU のサスペンドを妨げないため、タイマー自体はウェイクロックと AlarmManager で別途担保する(04-native.md §3.0)。',
+    render: () => running(),
+    shade: () => notif('観測中', '最終送信 14:32 ・ 5分間隔 ・ 玄関') },
+
+  { group: '通知', id: 'notif-offline',
+    title: '常駐通知(オフライン)',
+    note: '通知からも待機件数が分かるようにする。画面を点けなくても異常に気づける。',
+    render: () => running({ status: 'offline' }),
+    shade: () => notif('オフライン', '12件待機中 ・ 最終送信 11:48 ・ 玄関') },
+];
+
+// ---------- 切り替え ----------
+const list = document.getElementById('scenarios');
+const screen = document.getElementById('screen');
+const shade = document.getElementById('shade');
+const title = document.getElementById('sc-title');
+const note = document.getElementById('sc-note');
+let current = SCENARIOS[0].id;
+
+function draw() {
+  const sc = SCENARIOS.find(s => s.id === current);
+  screen.innerHTML = sc.render();
+  shade.innerHTML = sc.shade
+    ? `<div class="shade-label">通知シェード</div>${sc.shade()}`
+    : '';
+  title.textContent = sc.title;
+  note.textContent = sc.note;
+  [...list.querySelectorAll('.scenario')].forEach(b =>
+    b.setAttribute('aria-current', String(b.dataset.id === current)));
+}
+
+let lastGroup = null;
+SCENARIOS.forEach(sc => {
+  if (sc.group !== lastGroup) {
+    lastGroup = sc.group;
+    const g = document.createElement('div');
+    g.className = 'group-label';
+    g.textContent = sc.group;
+    list.appendChild(g);
+  }
+  const b = document.createElement('button');
+  b.className = 'scenario';
+  b.dataset.id = sc.id;
+  b.textContent = sc.title;
+  b.onclick = () => { current = sc.id; draw(); };
+  list.appendChild(b);
+});
+
+draw();
+</script>
+</body>
+</html>

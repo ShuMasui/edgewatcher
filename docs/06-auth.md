@@ -55,7 +55,7 @@ QR コードの向きは「Web が表示 → 端末がスキャン」。OTP に�
       { pairingCode, deviceInfo: { model, osVersion, appVersion } }
    ▼
 [Lambda] GSI2 で pairingCode から PairingSession を逆引き
-      (GSI は結果整合。空振り時は端末が1秒間隔で最大3回リトライする)
+      (GSI は結果整合。空振り時は端末が1秒間隔で最大3回リトライする → `04-native.md` §1.4)
    ▼
 [Lambda] TransactWriteItems(1コール)
    - Update : PairingSession を PENDING → CONSUMED

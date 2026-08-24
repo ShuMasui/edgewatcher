@@ -178,6 +178,19 @@ module "domain" {
 | `api` | API Gateway HTTP API、ルート定義、オーソライザ2種、カスタムドメイン紐付け | API エンドポイント、実行 ARN |
 | `lambda` | Lambda 関数1つ分(関数・IAM ロール・ロググループ・権限) | 関数 ARN、Invoke ARN |
 
+### `retention_days` は3箇所に配る
+
+保持期間(dev = 1、prod = 7)は env の変数として1箇所で定義し、そこから3つの宛先に配る。
+
+| 宛先 | 用途 |
+| --- | --- |
+| `storage-images` | S3 ライフサイクルルールの日数 |
+| `lambda` の環境変数 | 観測レコードの `expiresAt`(DynamoDB TTL)の計算 |
+| API のレスポンス(`GET /app-config`) | Web が履歴を遡れる範囲(`retentionDays`)の決定 |
+
+同じ値が S3 と DynamoDB の両方に効くため、変数を1つにしておかないと
+「画像はないのにレコードだけ残る」ずれが生じる。
+
 ### Cognito モジュールが1つで済む理由
 
 当初は Web User Pool と Device User Pool の2つを想定していたが、**Device User Pool は廃止した**
@@ -187,7 +200,8 @@ Cognito は Web 利用者の認証だけを担う。結果として「2つの Po
 
 ### `lambda` を汎用モジュールにする理由
 
-Go の Lambda 関数は今後増える(アップロード受信、ペアリング、トークン発行、Authorizer、Web 向け API…)。
+Go の Lambda 関数は4つある(`web-api` / `device-auth` / `device-api` / `authorizer`。
+分割の根拠は `05-backend.md` §1.1)。
 関数ごとに IAM ロール・ロググループ・保持期間・環境変数の定型を書き直すのは変更漏れの温床になるため、
 「関数1つ = モジュール1呼び出し」の形にする。ロググループを Terraform で明示的に作るのは、
 Lambda が暗黙に作るロググループには保持期間が設定されず(無期限保存)、コストが際限なく積み上がるため。
@@ -225,6 +239,7 @@ HTTP API を1つ作り、経路によってオーソライザを使い分ける�
 | --- | --- | --- |
 | `/devices/*`(Web からの端末管理) | JWT オーソライザ | Cognito Web Pool の issuer を指定。Lambda 不要 |
 | `/observations/*`(Web からの閲覧) | JWT オーソライザ | 同上 |
+| `/app-config`(Web の環境定数) | JWT オーソライザ | 同上。非機密だが例外を作らない(`03-web.md` §3.8) |
 | `/device/token`, `/device/pair` | なし(認証前) | Lambda 内でコード/シークレットを検証 |
 | `/device/uploads`, `/device/logout` | Lambda オーソライザ | DynamoDB を引いて端末セッションを検証 |
 
@@ -240,8 +255,10 @@ Web 側に Cognito 組み込みの JWT オーソライザを使うのは、Lambd
 ### 画像バケット(`storage-images`)
 
 - パブリックアクセスを全ブロック。Web からの参照は署名付き URL のみ
-- ライフサイクルルールで**1日後**に自動削除(APP-03 で確定)。DynamoDB 側の TTL と同じ値を設定し、
-  「画像はないのにレコードだけ残る」状態を避ける
+- ライフサイクルルールで `var.retention_days` 日後に自動削除(dev = 1、prod = 7)。
+  DynamoDB 側の TTL と同じ値を使い、「画像はないのにレコードだけ残る」状態を避ける
+- **両環境とも自動削除を有効にする。** dev だけ無効にすると、開発中に溜まった画像が
+  無期限に残ってコストが積み上がる
 - バージョニングは無効。上書きが発生しない書き込み専用の用途であり、コストに見合わない
 
 ### Web 配信バケット(`web-hosting`)
