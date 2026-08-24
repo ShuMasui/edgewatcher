@@ -118,6 +118,49 @@ func TestRoutePropagatesKnownApiErrCodeAndStatus(t *testing.T) {
 	}
 }
 
+func TestHandlePanicsOnDuplicateRouteKey(t *testing.T) {
+	r := New(nil)
+	r.Handle("GET /devices", func(ctx context.Context, req events.APIGatewayV2HTTPRequest) (Response, error) {
+		return Response{}, nil
+	})
+
+	defer func() {
+		p := recover()
+		if p == nil {
+			t.Fatal("expected Handle to panic on a duplicate route key registration")
+		}
+		msg, ok := p.(string)
+		if !ok || !strings.Contains(msg, "GET /devices") {
+			t.Errorf("panic value = %v, want it to name the duplicated route key", p)
+		}
+	}()
+
+	r.Handle("GET /devices", func(ctx context.Context, req events.APIGatewayV2HTTPRequest) (Response, error) {
+		return Response{}, nil
+	})
+}
+
+func TestRouteWithNilBodyOmitsContentTypeAndJSONNull(t *testing.T) {
+	r := New(nil)
+	r.Handle("DELETE /devices/1", func(ctx context.Context, req events.APIGatewayV2HTTPRequest) (Response, error) {
+		return Response{StatusCode: 204}, nil
+	})
+
+	resp, err := r.Route(context.Background(), newReq("DELETE /devices/1"))
+	if err != nil {
+		t.Fatalf("Route returned non-nil error: %v", err)
+	}
+	if resp.StatusCode != 204 {
+		t.Fatalf("StatusCode = %d, want 204", resp.StatusCode)
+	}
+	if resp.Body != "" {
+		t.Errorf("Body = %q, want empty (not the JSON literal null)", resp.Body)
+	}
+	if _, ok := resp.Headers["content-type"]; ok {
+		t.Errorf("a bodyless response must not carry a content-type header, got %q", resp.Headers["content-type"])
+	}
+}
+
 func TestRouteRecoversPanicsIntoWellFormedResponse(t *testing.T) {
 	r := New(nil)
 	r.Handle("GET /panics", func(ctx context.Context, req events.APIGatewayV2HTTPRequest) (Response, error) {

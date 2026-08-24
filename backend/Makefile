@@ -23,7 +23,7 @@ $(FUNCTIONS):
 	cd $(DIST)/$@ && zip -X -q ../$@.zip bootstrap
 
 fmt:
-	gofmt -l .
+	@out=$$(gofmt -l .); if [ -n "$$out" ]; then echo "unformatted:"; echo "$$out"; exit 1; fi
 
 vet:
 	go vet ./...

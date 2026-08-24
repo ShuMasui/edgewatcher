@@ -46,8 +46,17 @@ func New(logger *slog.Logger) *Router {
 	return &Router{logger: logger, routes: make(map[string]HandlerFunc)}
 }
 
-// Handle registers h for routeKey, e.g. "GET /devices".
+// Handle registers h for routeKey, e.g. "GET /devices". It panics if
+// routeKey is already registered: this runs once at cold start before
+// lambda.Start, so a panic there is a fail-fast deploy signal (consistent
+// with config.Load's os.Exit(1) in each main), not a runtime failure. A
+// silently overwritten handler would instead surface as a route that
+// works but serves the wrong body — exactly the drift class the
+// exact-match router exists to make loud.
 func (rt *Router) Handle(routeKey string, h HandlerFunc) {
+	if _, exists := rt.routes[routeKey]; exists {
+		panic("httpx: route already registered: " + routeKey)
+	}
 	rt.routes[routeKey] = h
 }
 
@@ -82,6 +91,14 @@ func (rt *Router) Route(ctx context.Context, req events.APIGatewayV2HTTPRequest)
 	status := out.StatusCode
 	if status == 0 {
 		status = http.StatusOK
+	}
+
+	// A nil Body (e.g. DELETE /devices/{id}, POST /device/logout returning
+	// Response{StatusCode: 204}) means no body at all — json.Marshal(nil)
+	// would otherwise emit the literal `null` with a JSON content-type,
+	// which is an invalid 204 per RFC 9110 §15.3.5.
+	if out.Body == nil {
+		return events.APIGatewayV2HTTPResponse{StatusCode: status}, nil
 	}
 
 	body, marshalErr := json.Marshal(out.Body)
