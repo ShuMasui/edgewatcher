@@ -956,54 +956,14 @@ func TestCreatePairingSession_ReissuesWithoutRecreatingDevice(t *testing.T) {
 	}
 }
 
-// TestCreatePairingSession_RejectsArchivedDevice pins I3: re-issuing a QR
-// for a deleted (ARCHIVED) device must fail rather than minting a live,
-// GSI2-resolvable PENDING session under a device that can never
-// successfully pair.
-func TestCreatePairingSession_RejectsArchivedDevice(t *testing.T) {
-	ctx := context.Background()
-	client := newIntegrationClient(t)
-	table := createTestTable(t, client)
-	s := New(client, table)
-
-	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
-	consumePairingFixture(t, ctx, s, "d-reissue-arch", "ORIGCODE", now)
-	if _, err := s.ArchiveDevice(ctx, "d-reissue-arch", now.Add(1*time.Second)); err != nil {
-		t.Fatalf("ArchiveDevice: %v", err)
-	}
-
-	_, err := s.CreatePairingSession(ctx, CreatePairingSessionInput{
-		DeviceID: "d-reissue-arch", OwnerID: "owner-consume", PairingCode: "REISSUEDCODE", Now: now.Add(2 * time.Second),
-	})
-	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodeDeviceNotFound {
-		t.Fatalf("expected CodeDeviceNotFound re-issuing a QR for an ARCHIVED device, got %v", err)
-	}
-
-	// No orphan PairingSession must have been written.
-	if _, err := s.FindPairingByCode(ctx, "REISSUEDCODE"); err == nil {
-		t.Fatal("expected no PairingSession to have been created for the rejected re-issue")
-	}
-}
-
-// TestCreatePairingSession_RejectsNonexistentDevice pins the same
-// ConditionCheck against a deviceId that never existed at all.
-func TestCreatePairingSession_RejectsNonexistentDevice(t *testing.T) {
-	ctx := context.Background()
-	client := newIntegrationClient(t)
-	table := createTestTable(t, client)
-	s := New(client, table)
-
-	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
-	_, err := s.CreatePairingSession(ctx, CreatePairingSessionInput{
-		DeviceID: "never-existed", OwnerID: "owner-x", PairingCode: "ORPHANCODE", Now: now,
-	})
-	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodeDeviceNotFound {
-		t.Fatalf("expected CodeDeviceNotFound for a nonexistent deviceId, got %v", err)
-	}
-	if _, err := s.FindPairingByCode(ctx, "ORPHANCODE"); err == nil {
-		t.Fatal("expected no orphan PairingSession under a nonexistent device")
-	}
-}
+// Note (R11): CreatePairingSession deliberately has no Device-row guard —
+// see its doc comment in pairing.go for why a TransactWriteItems
+// ConditionCheck was tried and reverted (dynamodb:ConditionCheckItem is
+// not granted to web-api). Re-issuing against an archived or nonexistent
+// deviceId is a pointless write (ConsumePairing's own status <> ARCHIVED
+// condition is the real, load-bearing gate and holds regardless), not an
+// exploitable one, so there is no test here asserting rejection — there
+// is nothing in this method that rejects it.
 
 // TestTouchDeviceLatest_NormalizesTimestampsAcrossOffsets pins I1: a
 // latestCapturedAt written in one UTC offset must still be correctly

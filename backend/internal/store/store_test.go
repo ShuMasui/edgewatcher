@@ -506,10 +506,13 @@ func TestUpdateDeviceProfile_RejectsArchivedDevice_ExpressionShape(t *testing.T)
 	}
 }
 
-// TestCreatePairingSession_TransactItemsShape pins I3's ConditionCheck: a
-// TransactWriteItems with a ConditionCheck on the Device row (index 0)
-// ahead of the PairingSession Put (index 1).
-func TestCreatePairingSession_TransactItemsShape(t *testing.T) {
+// TestCreatePairingSession_PutItemShape pins the reverted I3 fix (R11): a
+// single PutItem — not a transaction, and in particular no ConditionCheck
+// (that would require dynamodb:ConditionCheckItem, which the deployed
+// web-api role does not grant) — guarded only by attribute_not_exists(PK),
+// the ULID/pairingCode collision guard. Deleting this ConditionExpression
+// would make the Put an unconditioned upsert and this test would catch it.
+func TestCreatePairingSession_PutItemShape(t *testing.T) {
 	stub := &stubDynamoDBAPI{}
 	s := New(stub, "test-table")
 
@@ -520,29 +523,15 @@ func TestCreatePairingSession_TransactItemsShape(t *testing.T) {
 		t.Fatalf("CreatePairingSession: %v", err)
 	}
 
-	if stub.transactWriteItemsInput == nil {
-		t.Fatal("expected a TransactWriteItems call")
+	if stub.transactWriteItemsInput != nil {
+		t.Fatal("CreatePairingSession must not use TransactWriteItems — ConditionCheck requires dynamodb:ConditionCheckItem, which web-api's IAM role does not grant (infra/envs/dev/iam.tf)")
 	}
-	items := stub.transactWriteItemsInput.TransactItems
-	if len(items) != 2 {
-		t.Fatalf("expected 2 transact items, got %d", len(items))
+	if len(stub.putItemInputs) != 1 {
+		t.Fatalf("expected exactly 1 PutItem call, got %d", len(stub.putItemInputs))
 	}
-
-	check := items[0].ConditionCheck
-	if check == nil {
-		t.Fatal("index 0 must be a ConditionCheck on the Device row")
-	}
-	wantCheckCond := "attribute_exists(PK) AND #status <> :archived"
-	if check.ConditionExpression == nil || *check.ConditionExpression != wantCheckCond {
-		t.Fatalf("unexpected Device ConditionCheck expression: %v, want %q", check.ConditionExpression, wantCheckCond)
-	}
-	if check.ExpressionAttributeNames["#status"] != "status" {
-		t.Fatalf("Device ConditionCheck must escape #status -> status, got %v", check.ExpressionAttributeNames)
-	}
-
-	put := items[1].Put
-	if put == nil || put.ConditionExpression == nil || *put.ConditionExpression != "attribute_not_exists(PK)" {
-		t.Fatalf("PairingSession Put must have ConditionExpression attribute_not_exists(PK), got %+v", put)
+	in := stub.putItemInputs[0]
+	if in.ConditionExpression == nil || *in.ConditionExpression != "attribute_not_exists(PK)" {
+		t.Fatalf("CreatePairingSession must set ConditionExpression attribute_not_exists(PK), got %v", in.ConditionExpression)
 	}
 }
 

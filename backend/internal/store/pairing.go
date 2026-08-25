@@ -177,30 +177,42 @@ type CreatePairingSessionInput struct {
 // CreatePairingSession implements POST /devices/{id}/pairing-sessions
 // (docs/03-web.md §1.8.2, docs/05-backend.md §1.2): re-issuing a QR for an
 // existing device without recreating the Device row (deviceId is
-// immutable).
+// immutable). A single PutItem, not a transaction: it writes exactly one
+// new item (a fresh PairingCode means a fresh SK).
 //
-// This is a TransactWriteItems with a ConditionCheck on the Device row
-// (attribute_exists(PK) AND status <> ARCHIVED) alongside the
-// PairingSession Put. web-api's IAM role already grants TransactWriteItems
-// on the table (infra/envs/dev/iam.tf's web_api policy document), so this
-// costs no new permission. Without the ConditionCheck, re-issuing against
-// a deleted deviceId would still mint a live, GSI2-resolvable PENDING
-// session for a device that can never successfully pair (ConsumePairing's
-// own status <> ARCHIVED condition is the real gate and holds regardless),
-// and a typo'd/nonexistent deviceId would leave an orphan session under a
-// partition with no Device row at all. Neither is exploitable, but both
-// are pointless writes this check now rejects up front.
+// ConditionExpression: attribute_not_exists(PK) is a ULID/pairingCode
+// collision guard only (symmetric to the same check in
+// CreateDeviceWithPairing) — vanishingly unlikely to ever fire, but an
+// unconditional Put is an upsert and this package never leaves one
+// unconditioned. It does NOT check that the Device row exists or is
+// non-ARCHIVED: ConsumePairing's own "attribute_exists(PK) AND status <>
+// ARCHIVED" condition is the real, load-bearing gate against pairing an
+// archived or nonexistent device, and it holds regardless of what this
+// method does.
 //
-// The PairingSession Put itself keeps attribute_not_exists(PK) — a fresh
-// PairingCode means a fresh SK, so this is unfireable in practice, but the
-// collision case CreateDeviceWithPairing guards against is symmetric here.
+// A Device-row check was deliberately NOT added here as a
+// TransactWriteItems ConditionCheck, even though it would reject a
+// re-issue against a deleted/nonexistent deviceId up front rather than
+// producing a QR that can only ever fail. ConditionCheck is governed by
+// the IAM action dynamodb:ConditionCheckItem, which is DISTINCT from
+// dynamodb:TransactWriteItems (holding the latter does not grant the
+// former) and which the deployed web-api role
+// (infra/envs/dev/iam.tf) does not grant — adding one here would make
+// every call to this method fail closed with AccessDeniedException in the
+// real environment, which no test running against DynamoDB Local (which
+// does not enforce IAM) would catch. If a device-existence check is wanted
+// here in the future, it requires either an IAM change (out of this
+// package's scope, G4) or an UpdateItem in place of the Put — the latter
+// was also rejected: every attribute a no-op Update could SET on the
+// PairingSession row is otherwise supplied by this same Put, so turning it
+// into an Update would mean crafting an item-shape workaround rather than
+// a real fix.
 func (s *Store) CreatePairingSession(ctx context.Context, in CreatePairingSessionInput) (*PairingSession, error) {
-	deviceKeyVal := deviceKey(in.DeviceID)
 	createdAt := formatISO(in.Now)
 	expiresAt := in.Now.Add(pairingSessionTTL).Unix()
 
 	session := PairingSession{
-		PK: deviceKeyVal, SK: pairingSK(in.PairingCode), EntityType: "PairingSession",
+		PK: deviceKey(in.DeviceID), SK: pairingSK(in.PairingCode), EntityType: "PairingSession",
 		DeviceID: in.DeviceID, OwnerID: in.OwnerID, PairingCode: in.PairingCode,
 		Status: PairingStatusPending, ExpiresAt: expiresAt, CreatedAt: createdAt,
 		GSI1PK: ownerGSI1PK(in.OwnerID), GSI1SK: pairingGSI1SK(in.DeviceID),
@@ -211,48 +223,15 @@ func (s *Store) CreatePairingSession(ctx context.Context, in CreatePairingSessio
 		return nil, wrapInternal("CreatePairingSession: marshal", err)
 	}
 
-	_, err = s.client.TransactWriteItems(ctx, &dynamodb.TransactWriteItemsInput{
-		TransactItems: []types.TransactWriteItem{
-			{ConditionCheck: &types.ConditionCheck{
-				TableName: &s.table,
-				Key: map[string]types.AttributeValue{
-					"PK": stringAV(deviceKeyVal), "SK": stringAV(deviceKeyVal),
-				},
-				ConditionExpression: strPtr("attribute_exists(PK) AND #status <> :archived"),
-				ExpressionAttributeNames: map[string]string{
-					"#status": "status",
-				},
-				ExpressionAttributeValues: map[string]types.AttributeValue{
-					":archived": stringAV(DeviceStatusArchived),
-				},
-			}},
-			{Put: &types.Put{
-				TableName:           &s.table,
-				Item:                item,
-				ConditionExpression: strPtr("attribute_not_exists(PK)"),
-			}},
-		},
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           &s.table,
+		Item:                item,
+		ConditionExpression: strPtr("attribute_not_exists(PK)"),
 	})
 	if err != nil {
-		return nil, classifyCreatePairingSessionError(err)
+		return nil, wrapInternal("CreatePairingSession", err)
 	}
 	return &session, nil
-}
-
-// classifyCreatePairingSessionError maps a canceled CreatePairingSession
-// transaction to DEVICE_NOT_FOUND when the Device ConditionCheck (index 0)
-// is what failed — the device doesn't exist or is ARCHIVED. Any other
-// cancellation (in practice, only the vanishingly unlikely PairingCode
-// collision on index 1) is reported as internal.
-func classifyCreatePairingSessionError(err error) error {
-	var tce *types.TransactionCanceledException
-	if !errors.As(err, &tce) {
-		return wrapInternal("CreatePairingSession", err)
-	}
-	if len(tce.CancellationReasons) > 0 && cancellationCodeIs(tce.CancellationReasons[0], "ConditionalCheckFailed") {
-		return apierr.New(apierr.CodeDeviceNotFound, "device not found")
-	}
-	return wrapInternal("CreatePairingSession: transaction canceled", err)
 }
 
 // ConsumePairingInput is the input to ConsumePairing.
@@ -390,7 +369,20 @@ func classifyConsumePairingError(err error, now time.Time) error {
 // honest answer for a row that no longer exists to be resolved from GSI2
 // either, since a row only ever leaves PENDING existence by expiring
 // (whether this method catches it via the condition or TTL beats it to
-// physical deletion).
+// physical deletion). Note this empty-item branch, and this function
+// entirely, depend on ConsumePairing's Update carrying
+// ReturnValuesOnConditionCheckFailure: ALL_OLD (pinned by
+// TestConsumePairing_TransactItemsShape) — without it, every condition
+// failure would arrive here as an empty item, and a genuine CONSUMED
+// replay would quietly misreport as PAIRING_CODE_EXPIRED instead of
+// PAIRING_CODE_CONSUMED.
+//
+// One remaining, accepted imprecision: a code that was CONSUMED and then
+// later TTL-swept (the base row physically deleted) also arrives here with
+// an empty item, and is reported PAIRING_CODE_EXPIRED rather than the
+// technically-more-accurate PAIRING_CODE_CONSUMED. Both map to 409 and
+// both are "this code cannot be used" to the caller, so this is treated as
+// cosmetic rather than fixed.
 func classifyPairingConditionFailure(item map[string]types.AttributeValue, now time.Time) error {
 	if len(item) == 0 {
 		return apierr.New(apierr.CodePairingCodeExpired, "pairing code expired")
