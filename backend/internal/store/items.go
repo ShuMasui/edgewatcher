@@ -33,9 +33,13 @@ type Device struct {
 	Interval int    `dynamodbav:"interval"`
 
 	// DeviceSecretHash and SessionTokenHash are removed on disconnect
-	// (docs/06-auth.md §6), so both are optional.
-	DeviceSecretHash string `dynamodbav:"deviceSecretHash,omitempty"`
-	SessionTokenHash string `dynamodbav:"sessionTokenHash,omitempty"`
+	// (docs/06-auth.md §6), so both are optional. json:"-" on both: these
+	// are SHA-256 hashes of long-lived credentials, returned to this
+	// package's callers via ALL_NEW on several write paths, and must never
+	// be reachable by an accidental json.Marshal(dev) in a future handler
+	// (G7 — never leak credentials/pairingCode/signed URLs).
+	DeviceSecretHash string `dynamodbav:"deviceSecretHash,omitempty" json:"-"`
+	SessionTokenHash string `dynamodbav:"sessionTokenHash,omitempty" json:"-"`
 	// SessionExpiresAt is epoch seconds. It is a session deadline, not the
 	// table's TTL attribute — see doc.go.
 	SessionExpiresAt int64 `dynamodbav:"sessionExpiresAt,omitempty"`

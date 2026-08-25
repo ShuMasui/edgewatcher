@@ -355,6 +355,10 @@ func TestTouchDeviceLatest_ReturnValuesAllNewOnBothPaths(t *testing.T) {
 		if stub.updateItemInputs[0].ReturnValues != types.ReturnValueAllNew {
 			t.Fatalf("primary UpdateItem must set ReturnValues: ALL_NEW, got %v", stub.updateItemInputs[0].ReturnValues)
 		}
+		wantCond := "attribute_exists(PK) AND #status <> :archived AND (attribute_not_exists(latestCapturedAt) OR latestCapturedAt < :cap)"
+		if stub.updateItemInputs[0].ConditionExpression == nil || *stub.updateItemInputs[0].ConditionExpression != wantCond {
+			t.Fatalf("unexpected primary ConditionExpression: %v, want %q", stub.updateItemInputs[0].ConditionExpression, wantCond)
+		}
 		if dev.Interval != 5 {
 			t.Fatalf("expected Interval to come back via ALL_NEW, got %d", dev.Interval)
 		}
@@ -382,8 +386,9 @@ func TestTouchDeviceLatest_ReturnValuesAllNewOnBothPaths(t *testing.T) {
 		if stub.updateItemInputs[1].ReturnValues != types.ReturnValueAllNew {
 			t.Fatalf("fallback UpdateItem must also set ReturnValues: ALL_NEW (this is how device-api gets interval without a GetItem it can't make), got %v", stub.updateItemInputs[1].ReturnValues)
 		}
-		if stub.updateItemInputs[1].ConditionExpression == nil || *stub.updateItemInputs[1].ConditionExpression != "attribute_exists(PK)" {
-			t.Fatalf("fallback UpdateItem must still require attribute_exists(PK) — UpdateItem is an upsert and device-api has no read permission to guard against resurrecting a deleted device, got %v", stub.updateItemInputs[1].ConditionExpression)
+		wantFallbackCond := "attribute_exists(PK) AND #status <> :archived"
+		if stub.updateItemInputs[1].ConditionExpression == nil || *stub.updateItemInputs[1].ConditionExpression != wantFallbackCond {
+			t.Fatalf("fallback UpdateItem must require %q — UpdateItem is an upsert and device-api has no read permission to guard against resurrecting a deleted or archived device, got %v", wantFallbackCond, stub.updateItemInputs[1].ConditionExpression)
 		}
 		if dev.Interval != 10 {
 			t.Fatalf("expected Interval from the fallback's ALL_NEW, got %d", dev.Interval)
@@ -463,5 +468,91 @@ func TestArchiveDevice_SwapsGSI1PK(t *testing.T) {
 	gsi1pk, ok := in.ExpressionAttributeValues[":gsi1pk"].(*types.AttributeValueMemberS)
 	if !ok || gsi1pk.Value != "ARCHIVED" {
 		t.Fatalf("ArchiveDevice must swap GSI1PK to the literal \"ARCHIVED\" partition, got %v", in.ExpressionAttributeValues[":gsi1pk"])
+	}
+}
+
+// TestUpdateDeviceProfile_RejectsArchivedDevice_ExpressionShape pins the
+// exact ConditionExpression string (I2): deleting the "AND #status <>
+// :archived" clause must fail this test even though the happy-path
+// integration test wouldn't notice, since it never exercises an ARCHIVED
+// device.
+func TestUpdateDeviceProfile_RejectsArchivedDevice_ExpressionShape(t *testing.T) {
+	stub := &stubDynamoDBAPI{
+		updateItemOutputs: []*dynamodb.UpdateItemOutput{
+			{Attributes: mustMarshalMap(t, Device{PK: deviceKey("d1"), SK: deviceKey("d1"), Name: "New Name", Interval: 15})},
+		},
+	}
+	s := New(stub, "test-table")
+
+	newName := "New Name"
+	newInterval := 15
+	if _, err := s.UpdateDeviceProfile(context.Background(), UpdateDeviceProfileInput{
+		DeviceID: "d1", Name: &newName, Interval: &newInterval,
+	}); err != nil {
+		t.Fatalf("UpdateDeviceProfile: %v", err)
+	}
+
+	in := stub.updateItemInputs[0]
+	wantCond := "attribute_exists(PK) AND #status <> :archived"
+	if in.ConditionExpression == nil || *in.ConditionExpression != wantCond {
+		t.Fatalf("UpdateDeviceProfile must set ConditionExpression %q (rejecting an ARCHIVED device), got %v", wantCond, in.ConditionExpression)
+	}
+	if in.ExpressionAttributeNames["#status"] != "status" {
+		t.Fatalf("UpdateDeviceProfile must escape #status -> status, got %v", in.ExpressionAttributeNames)
+	}
+	archivedVal, ok := in.ExpressionAttributeValues[":archived"].(*types.AttributeValueMemberS)
+	if !ok || archivedVal.Value != "ARCHIVED" {
+		t.Fatalf("UpdateDeviceProfile must bind :archived to \"ARCHIVED\", got %v", in.ExpressionAttributeValues[":archived"])
+	}
+}
+
+// TestCreatePairingSession_TransactItemsShape pins I3's ConditionCheck: a
+// TransactWriteItems with a ConditionCheck on the Device row (index 0)
+// ahead of the PairingSession Put (index 1).
+func TestCreatePairingSession_TransactItemsShape(t *testing.T) {
+	stub := &stubDynamoDBAPI{}
+	s := New(stub, "test-table")
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	if _, err := s.CreatePairingSession(context.Background(), CreatePairingSessionInput{
+		DeviceID: "d1", OwnerID: "o1", PairingCode: "NEWCODE", Now: now,
+	}); err != nil {
+		t.Fatalf("CreatePairingSession: %v", err)
+	}
+
+	if stub.transactWriteItemsInput == nil {
+		t.Fatal("expected a TransactWriteItems call")
+	}
+	items := stub.transactWriteItemsInput.TransactItems
+	if len(items) != 2 {
+		t.Fatalf("expected 2 transact items, got %d", len(items))
+	}
+
+	check := items[0].ConditionCheck
+	if check == nil {
+		t.Fatal("index 0 must be a ConditionCheck on the Device row")
+	}
+	wantCheckCond := "attribute_exists(PK) AND #status <> :archived"
+	if check.ConditionExpression == nil || *check.ConditionExpression != wantCheckCond {
+		t.Fatalf("unexpected Device ConditionCheck expression: %v, want %q", check.ConditionExpression, wantCheckCond)
+	}
+	if check.ExpressionAttributeNames["#status"] != "status" {
+		t.Fatalf("Device ConditionCheck must escape #status -> status, got %v", check.ExpressionAttributeNames)
+	}
+
+	put := items[1].Put
+	if put == nil || put.ConditionExpression == nil || *put.ConditionExpression != "attribute_not_exists(PK)" {
+		t.Fatalf("PairingSession Put must have ConditionExpression attribute_not_exists(PK), got %+v", put)
+	}
+}
+
+// TestClassifyPairingConditionFailure_EmptyItemIsExpired pins Minor 4: a
+// TTL-swept row (empty ALL_OLD item) must classify as
+// PAIRING_CODE_EXPIRED, not CodeInternal.
+func TestClassifyPairingConditionFailure_EmptyItemIsExpired(t *testing.T) {
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	err := classifyPairingConditionFailure(map[string]types.AttributeValue{}, now)
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodePairingCodeExpired {
+		t.Fatalf("expected CodePairingCodeExpired for an empty ALL_OLD item, got %s", apiErr.Code)
 	}
 }

@@ -59,6 +59,20 @@ func stringAV(v string) *types.AttributeValueMemberS {
 
 func boolPtr(b bool) *bool { return &b }
 
+// formatISO renders t as a UTC RFC3339 timestamp. It is the single
+// chokepoint every ISO-8601 timestamp this package writes goes through,
+// and normalizing to UTC before formatting is mandatory, not cosmetic:
+// latestCapturedAt is compared lexicographically inside a
+// ConditionExpression (TouchDeviceLatest), and a lexicographic compare of
+// RFC3339 strings is monotone with wall-clock time only if every write
+// uses the same UTC offset. A caller-supplied time.Time in a non-UTC
+// location (e.g. JST, "+09:00") would otherwise sort incorrectly against
+// a "Z" timestamp written by another call — silently breaking the "reject
+// an older photo" guarantee this package exists to enforce.
+func formatISO(t time.Time) string {
+	return t.UTC().Format(time.RFC3339)
+}
+
 // isConditionalCheckFailed reports whether err is a single-request
 // (non-transactional) DynamoDB ConditionalCheckFailedException — the
 // UpdateItem/PutItem equivalent of a TransactWriteItems cancellation.
@@ -176,7 +190,7 @@ func (s *Store) DisconnectDevice(ctx context.Context, deviceID string) (*Device,
 // exists at all.
 func (s *Store) ArchiveDevice(ctx context.Context, deviceID string, now time.Time) (*Device, error) {
 	key := deviceKey(deviceID)
-	archivedAt := now.Format(time.RFC3339)
+	archivedAt := formatISO(now)
 
 	out, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           &s.table,
@@ -300,20 +314,39 @@ type TouchDeviceLatestInput struct {
 // Both paths use ReturnValues: ALL_NEW so device-api can read back
 // Interval for the upload response's nextConfig without a GetItem it is
 // not permitted to make.
+//
+// Both paths also require status <> ARCHIVED, the same defense-in-depth
+// already applied to ConsumePairing: the authorizer is what actually keeps
+// an archived device from reaching this code path (its credentials are
+// invalidated by ArchiveDevice), but ArchiveDevice leaves the row itself
+// in place, so this guard is nearly free and stops a write to an archived
+// device's row from succeeding by any other means.
+//
+// recvIso/capIso are formatted via formatISO (UTC, fixed-width RFC3339),
+// never time.RFC3339Nano: latestCapturedAt is compared lexicographically
+// as an index value, and RFC3339Nano's variable-width fractional seconds
+// would make that comparison non-monotone ("...:00.5Z" sorts before
+// "...:00Z"). Two uploads landing in the same second could in principle
+// collide/truncate to the same value; at a 5-minute upload interval this
+// is an acceptable, deliberate trade for keeping the ordering exact.
 func (s *Store) TouchDeviceLatest(ctx context.Context, in TouchDeviceLatestInput) (*Device, error) {
 	key := deviceKey(in.DeviceID)
-	recvIso := in.ReceivedAt.Format(time.RFC3339)
-	capIso := in.LatestCapturedAt.Format(time.RFC3339)
+	recvIso := formatISO(in.ReceivedAt)
+	capIso := formatISO(in.LatestCapturedAt)
 
 	out, err := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           &s.table,
 		Key:                 map[string]types.AttributeValue{"PK": stringAV(key), "SK": stringAV(key)},
 		UpdateExpression:    strPtr("SET lastReceivedAt = :recv, latestThumbnailKey = :thumb, latestCapturedAt = :cap"),
-		ConditionExpression: strPtr("attribute_exists(PK) AND (attribute_not_exists(latestCapturedAt) OR latestCapturedAt < :cap)"),
+		ConditionExpression: strPtr("attribute_exists(PK) AND #status <> :archived AND (attribute_not_exists(latestCapturedAt) OR latestCapturedAt < :cap)"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":recv":  stringAV(recvIso),
-			":thumb": stringAV(in.LatestThumbnailKey),
-			":cap":   stringAV(capIso),
+			":recv":     stringAV(recvIso),
+			":thumb":    stringAV(in.LatestThumbnailKey),
+			":cap":      stringAV(capIso),
+			":archived": stringAV(DeviceStatusArchived),
 		},
 		ReturnValues: types.ReturnValueAllNew,
 	})
@@ -329,14 +362,18 @@ func (s *Store) TouchDeviceLatest(ctx context.Context, in TouchDeviceLatestInput
 	}
 
 	// Fallback: advance lastReceivedAt only. Still requires the device to
-	// exist — see doc comment above.
+	// exist and not be ARCHIVED — see doc comment above.
 	fallbackOut, ferr := s.client.UpdateItem(ctx, &dynamodb.UpdateItemInput{
 		TableName:           &s.table,
 		Key:                 map[string]types.AttributeValue{"PK": stringAV(key), "SK": stringAV(key)},
 		UpdateExpression:    strPtr("SET lastReceivedAt = :recv"),
-		ConditionExpression: strPtr("attribute_exists(PK)"),
+		ConditionExpression: strPtr("attribute_exists(PK) AND #status <> :archived"),
+		ExpressionAttributeNames: map[string]string{
+			"#status": "status",
+		},
 		ExpressionAttributeValues: map[string]types.AttributeValue{
-			":recv": stringAV(recvIso),
+			":recv":     stringAV(recvIso),
+			":archived": stringAV(DeviceStatusArchived),
 		},
 		ReturnValues: types.ReturnValueAllNew,
 	})

@@ -855,6 +855,35 @@ func TestUpdateDeviceProfile_RenamesAndChangesInterval(t *testing.T) {
 	}
 }
 
+// TestUpdateDeviceProfile_RejectsArchivedDevice pins I2: editing an
+// ARCHIVED (deleted) device must fail rather than silently succeed.
+func TestUpdateDeviceProfile_RejectsArchivedDevice(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	dev := Device{
+		PK: deviceKey("d-profile-arch"), SK: deviceKey("d-profile-arch"), EntityType: "Device",
+		DeviceID: "d-profile-arch", OwnerID: "owner-profile", Name: "Old Name", Status: DeviceStatusPaired, Interval: 5,
+		GSI1PK: ownerGSI1PK("owner-profile"), GSI1SK: deviceGSI1SK("d-profile-arch"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	if _, err := s.ArchiveDevice(ctx, "d-profile-arch", now); err != nil {
+		t.Fatalf("ArchiveDevice: %v", err)
+	}
+
+	newName := "Should Not Apply"
+	_, err := s.UpdateDeviceProfile(ctx, UpdateDeviceProfileInput{
+		DeviceID: "d-profile-arch", Name: &newName,
+	})
+	if err == nil {
+		t.Fatal("expected UpdateDeviceProfile on an ARCHIVED device to fail")
+	}
+}
+
 // TestRotateSessionToken_ReplacesRatherThanAdds pins "session per device,
 // rotated on every exchange" (docs/06-auth.md §3).
 func TestRotateSessionToken_ReplacesRatherThanAdds(t *testing.T) {
@@ -924,5 +953,148 @@ func TestCreatePairingSession_ReissuesWithoutRecreatingDevice(t *testing.T) {
 	}
 	if dev.Status != DeviceStatusPending {
 		t.Fatalf("re-issuing a QR must not touch the Device row, got %+v", dev)
+	}
+}
+
+// TestCreatePairingSession_RejectsArchivedDevice pins I3: re-issuing a QR
+// for a deleted (ARCHIVED) device must fail rather than minting a live,
+// GSI2-resolvable PENDING session under a device that can never
+// successfully pair.
+func TestCreatePairingSession_RejectsArchivedDevice(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	consumePairingFixture(t, ctx, s, "d-reissue-arch", "ORIGCODE", now)
+	if _, err := s.ArchiveDevice(ctx, "d-reissue-arch", now.Add(1*time.Second)); err != nil {
+		t.Fatalf("ArchiveDevice: %v", err)
+	}
+
+	_, err := s.CreatePairingSession(ctx, CreatePairingSessionInput{
+		DeviceID: "d-reissue-arch", OwnerID: "owner-consume", PairingCode: "REISSUEDCODE", Now: now.Add(2 * time.Second),
+	})
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodeDeviceNotFound {
+		t.Fatalf("expected CodeDeviceNotFound re-issuing a QR for an ARCHIVED device, got %v", err)
+	}
+
+	// No orphan PairingSession must have been written.
+	if _, err := s.FindPairingByCode(ctx, "REISSUEDCODE"); err == nil {
+		t.Fatal("expected no PairingSession to have been created for the rejected re-issue")
+	}
+}
+
+// TestCreatePairingSession_RejectsNonexistentDevice pins the same
+// ConditionCheck against a deviceId that never existed at all.
+func TestCreatePairingSession_RejectsNonexistentDevice(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	_, err := s.CreatePairingSession(ctx, CreatePairingSessionInput{
+		DeviceID: "never-existed", OwnerID: "owner-x", PairingCode: "ORPHANCODE", Now: now,
+	})
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodeDeviceNotFound {
+		t.Fatalf("expected CodeDeviceNotFound for a nonexistent deviceId, got %v", err)
+	}
+	if _, err := s.FindPairingByCode(ctx, "ORPHANCODE"); err == nil {
+		t.Fatal("expected no orphan PairingSession under a nonexistent device")
+	}
+}
+
+// TestTouchDeviceLatest_NormalizesTimestampsAcrossOffsets pins I1: a
+// latestCapturedAt written in one UTC offset must still be correctly
+// superseded by a genuinely later timestamp written in a different offset.
+// Before formatISO normalized every write to UTC, a JST ("+09:00") write
+// followed by a genuinely later UTC ("Z") write would lose the
+// lexicographic compare purely because of the differing offset — freezing
+// the dashboard's thumbnail while lastReceivedAt kept advancing.
+func TestTouchDeviceLatest_NormalizesTimestampsAcrossOffsets(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	dev := Device{
+		PK: deviceKey("d-offset"), SK: deviceKey("d-offset"), EntityType: "Device",
+		DeviceID: "d-offset", OwnerID: "owner-offset", Name: "n", Status: DeviceStatusPaired, Interval: 5,
+		GSI1PK: ownerGSI1PK("owner-offset"), GSI1SK: deviceGSI1SK("d-offset"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	// First upload: captured at 2026-06-15T09:00:00+09:00, i.e. 00:00:00Z.
+	firstCaptured := time.Date(2026, 6, 15, 9, 0, 0, 0, ids.JST)
+	got, err := s.TouchDeviceLatest(ctx, TouchDeviceLatestInput{
+		DeviceID: "d-offset", ReceivedAt: firstCaptured, LatestCapturedAt: firstCaptured, LatestThumbnailKey: "thumb/jst",
+	})
+	if err != nil {
+		t.Fatalf("TouchDeviceLatest (JST): %v", err)
+	}
+	if got.LatestThumbnailKey != "thumb/jst" {
+		t.Fatalf("unexpected device after first touch: %+v", got)
+	}
+
+	// Second upload, one hour later in wall-clock time, expressed in UTC:
+	// 2026-06-15T01:00:00Z. Lexicographically "...T01..." < "...T09...",
+	// so without UTC normalization this would be wrongly rejected as
+	// "older".
+	secondCaptured := time.Date(2026, 6, 15, 1, 0, 0, 0, time.UTC)
+	if !secondCaptured.After(firstCaptured) {
+		t.Fatalf("test fixture is wrong: secondCaptured must be after firstCaptured, got %v vs %v", secondCaptured, firstCaptured)
+	}
+	got, err = s.TouchDeviceLatest(ctx, TouchDeviceLatestInput{
+		DeviceID: "d-offset", ReceivedAt: secondCaptured, LatestCapturedAt: secondCaptured, LatestThumbnailKey: "thumb/utc-later",
+	})
+	if err != nil {
+		t.Fatalf("TouchDeviceLatest (UTC, genuinely later): %v", err)
+	}
+	if got.LatestThumbnailKey != "thumb/utc-later" {
+		t.Fatalf("a genuinely later capturedAt in a different UTC offset must still advance latest*, got %q", got.LatestThumbnailKey)
+	}
+	if got.LatestCapturedAt != secondCaptured.UTC().Format(time.RFC3339) {
+		t.Fatalf("latestCapturedAt must be stored normalized to UTC, got %q", got.LatestCapturedAt)
+	}
+}
+
+// TestTouchDeviceLatest_RejectsArchivedDevice pins Minor 7: an upload
+// reaching TouchDeviceLatest for an ARCHIVED device must fail on both the
+// primary and fallback paths — defense-in-depth alongside the authorizer,
+// which is otherwise the only thing stopping this write.
+func TestTouchDeviceLatest_RejectsArchivedDevice(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	dev := Device{
+		PK: deviceKey("d-touch-arch"), SK: deviceKey("d-touch-arch"), EntityType: "Device",
+		DeviceID: "d-touch-arch", OwnerID: "owner-touch-arch", Name: "n", Status: DeviceStatusPaired, Interval: 5,
+		GSI1PK: ownerGSI1PK("owner-touch-arch"), GSI1SK: deviceGSI1SK("d-touch-arch"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	if _, err := s.ArchiveDevice(ctx, "d-touch-arch", now); err != nil {
+		t.Fatalf("ArchiveDevice: %v", err)
+	}
+
+	_, err := s.TouchDeviceLatest(ctx, TouchDeviceLatestInput{
+		DeviceID: "d-touch-arch", ReceivedAt: now.Add(1 * time.Minute), LatestCapturedAt: now.Add(1 * time.Minute), LatestThumbnailKey: "thumb/should-not-write",
+	})
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodeDeviceNotFound {
+		t.Fatalf("expected CodeDeviceNotFound writing to an ARCHIVED device, got %v", err)
+	}
+
+	// Neither path must have written anything: latestThumbnailKey stays
+	// unset and lastReceivedAt must not have advanced either.
+	got, err := s.GetDeviceForAuth(ctx, "d-touch-arch")
+	if err != nil {
+		t.Fatalf("GetDeviceForAuth: %v", err)
+	}
+	if got.LatestThumbnailKey != "" || got.LastReceivedAt != "" {
+		t.Fatalf("TouchDeviceLatest must not write anything to an ARCHIVED device, got %+v", got)
 	}
 }
