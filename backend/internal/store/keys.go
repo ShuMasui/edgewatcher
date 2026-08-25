@@ -10,6 +10,14 @@ const (
 	pairingPrefix = "PAIRING#"
 	obsPrefix     = "OBS#"
 	ownerPrefix   = "OWNER#"
+
+	// archivedGSI1PK is the single, deliberately hot partition that
+	// ARCHIVED devices are swapped into (§4). No reader in this package
+	// queries it — docs/01-openquestion.md DATA-02 puts that cleanup scan
+	// out of MVP scope — but Task 7's ArchiveDevice writes it: swapping
+	// GSI1PK away from OWNER#<ownerId> is what makes an archived device
+	// vanish from ListOwnerDevices with no FilterExpression involved.
+	archivedGSI1PK = "ARCHIVED"
 )
 
 // deviceKey returns "DEVICE#<deviceId>", used as both PK and SK for a

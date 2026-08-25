@@ -363,3 +363,566 @@ func TestFindPairingByCode(t *testing.T) {
 		t.Fatalf("expected CodePairingNotFound, got %s", apiErr.Code)
 	}
 }
+
+// TestCreateDeviceWithPairing_WritesBothItemsAtomically pins expression A:
+// one TransactWriteItems Put-ing a Device (PENDING) and its first
+// PairingSession together, both readable afterward.
+func TestCreateDeviceWithPairing_WritesBothItemsAtomically(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	dev, session, err := s.CreateDeviceWithPairing(ctx, CreateDeviceWithPairingInput{
+		OwnerID: "owner-1", DeviceID: "d-new", Name: "Backyard", Interval: 5,
+		PairingCode: "NEWCODE1", Now: now,
+	})
+	if err != nil {
+		t.Fatalf("CreateDeviceWithPairing: %v", err)
+	}
+	if dev.Status != DeviceStatusPending {
+		t.Fatalf("expected device status PENDING, got %s", dev.Status)
+	}
+	if session.Status != PairingStatusPending {
+		t.Fatalf("expected session status PENDING, got %s", session.Status)
+	}
+
+	gotDev, err := s.GetDeviceForAuth(ctx, "d-new")
+	if err != nil {
+		t.Fatalf("GetDeviceForAuth: %v", err)
+	}
+	if gotDev.Status != DeviceStatusPending || gotDev.OwnerID != "owner-1" {
+		t.Fatalf("unexpected device row: %+v", gotDev)
+	}
+
+	gotSession, err := s.FindPairingByCode(ctx, "NEWCODE1")
+	if err != nil {
+		t.Fatalf("FindPairingByCode: %v", err)
+	}
+	if gotSession.DeviceID != "d-new" || gotSession.Status != PairingStatusPending {
+		t.Fatalf("unexpected pairing session row: %+v", gotSession)
+	}
+
+	// A deviceId collision must fail the whole transaction, leaving neither
+	// item double-written or corrupted.
+	_, _, err = s.CreateDeviceWithPairing(ctx, CreateDeviceWithPairingInput{
+		OwnerID: "owner-2", DeviceID: "d-new", Name: "Collide", Interval: 10,
+		PairingCode: "OTHERCODE", Now: now,
+	})
+	if err == nil {
+		t.Fatal("expected a deviceId collision to fail the transaction")
+	}
+}
+
+// consumePairingFixture creates a PENDING Device + PairingSession pair via
+// CreateDeviceWithPairing, so ConsumePairing tests start from the exact
+// state that transaction produces rather than a hand-built fixture.
+func consumePairingFixture(t *testing.T, ctx context.Context, s *Store, deviceID, pairingCode string, now time.Time) {
+	t.Helper()
+	_, _, err := s.CreateDeviceWithPairing(ctx, CreateDeviceWithPairingInput{
+		OwnerID: "owner-consume", DeviceID: deviceID, Name: "n", Interval: 5,
+		PairingCode: pairingCode, Now: now,
+	})
+	if err != nil {
+		t.Fatalf("fixture CreateDeviceWithPairing: %v", err)
+	}
+}
+
+// TestConsumePairing_Success pins expression B's happy path: PairingSession
+// flips to CONSUMED and drops out of GSI2 (unresolvable via
+// FindPairingByCode), Device flips to PAIRED with the hash and deviceInfo
+// set.
+func TestConsumePairing_Success(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	consumePairingFixture(t, ctx, s, "d-ok", "OKCODE", now)
+
+	err := s.ConsumePairing(ctx, ConsumePairingInput{
+		DeviceID: "d-ok", PairingCode: "OKCODE", DeviceSecretHash: "secret-hash",
+		DeviceInfo: DeviceInfo{Model: "Pixel 8", OSVersion: "14", AppVersion: "1.2.0"},
+		Now:        now.Add(1 * time.Second),
+	})
+	if err != nil {
+		t.Fatalf("ConsumePairing: %v", err)
+	}
+
+	dev, err := s.GetDeviceForAuth(ctx, "d-ok")
+	if err != nil {
+		t.Fatalf("GetDeviceForAuth: %v", err)
+	}
+	if dev.Status != DeviceStatusPaired || dev.DeviceSecretHash != "secret-hash" {
+		t.Fatalf("unexpected device after consume: %+v", dev)
+	}
+	if dev.DeviceInfo == nil || dev.DeviceInfo.Model != "Pixel 8" {
+		t.Fatalf("expected deviceInfo to be set, got %+v", dev.DeviceInfo)
+	}
+
+	// GSI2 must no longer resolve this code — the REMOVE worked.
+	_, err = s.FindPairingByCode(ctx, "OKCODE")
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodePairingNotFound {
+		t.Fatalf("expected CodePairingNotFound (GSI2 no longer resolves a consumed code), got %v", err)
+	}
+
+	// The base-table row itself is still there, just CONSUMED.
+	out, err := client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: &table,
+		Key:       map[string]types.AttributeValue{"PK": stringAV(deviceKey("d-ok")), "SK": stringAV(pairingSK("OKCODE"))},
+	})
+	if err != nil {
+		t.Fatalf("GetItem pairing session: %v", err)
+	}
+	var session PairingSession
+	if err := attributevalue.UnmarshalMap(out.Item, &session); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if session.Status != PairingStatusConsumed {
+		t.Fatalf("expected CONSUMED, got %s", session.Status)
+	}
+	if _, present := out.Item["GSI2PK"]; present {
+		t.Fatal("GSI2PK must be removed from the consumed PairingSession row")
+	}
+}
+
+// TestConsumePairing_Expired_LeavesBothItemsUntouched pins the "distinguish
+// expired from consumed, and leave both items untouched" requirement.
+func TestConsumePairing_Expired_LeavesBothItemsUntouched(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	issuedAt := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	consumePairingFixture(t, ctx, s, "d-exp", "EXPCODE", issuedAt)
+
+	// Attempt consumption well past the 5-minute TTL.
+	tooLate := issuedAt.Add(10 * time.Minute)
+	err := s.ConsumePairing(ctx, ConsumePairingInput{
+		DeviceID: "d-exp", PairingCode: "EXPCODE", DeviceSecretHash: "secret-hash",
+		DeviceInfo: DeviceInfo{Model: "m"}, Now: tooLate,
+	})
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodePairingCodeExpired {
+		t.Fatalf("expected CodePairingCodeExpired, got %v", err)
+	}
+
+	// Neither item was touched: PairingSession still PENDING and still
+	// resolvable through GSI2; Device still PENDING with no credentials.
+	session, err := s.FindPairingByCode(ctx, "EXPCODE")
+	if err != nil {
+		t.Fatalf("FindPairingByCode after failed (expired) consume: %v", err)
+	}
+	if session.Status != PairingStatusPending {
+		t.Fatalf("expired-but-rejected consume must not touch PairingSession, got status %s", session.Status)
+	}
+
+	dev, err := s.GetDeviceForAuth(ctx, "d-exp")
+	if err != nil {
+		t.Fatalf("GetDeviceForAuth: %v", err)
+	}
+	if dev.Status != DeviceStatusPending || dev.DeviceSecretHash != "" {
+		t.Fatalf("expired-but-rejected consume must not touch Device, got %+v", dev)
+	}
+}
+
+// TestConsumePairing_AlreadyConsumed_DistinctFromExpired pins the other
+// half of the expired-vs-consumed distinction.
+func TestConsumePairing_AlreadyConsumed_DistinctFromExpired(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	consumePairingFixture(t, ctx, s, "d-replay", "REPLAYCODE", now)
+
+	firstAttempt := now.Add(1 * time.Second)
+	if err := s.ConsumePairing(ctx, ConsumePairingInput{
+		DeviceID: "d-replay", PairingCode: "REPLAYCODE", DeviceSecretHash: "hash-1",
+		DeviceInfo: DeviceInfo{Model: "m"}, Now: firstAttempt,
+	}); err != nil {
+		t.Fatalf("first ConsumePairing: %v", err)
+	}
+
+	// Replay with the same code, still within its TTL: must be classified
+	// as CONSUMED, not EXPIRED, even though the deadline hasn't passed.
+	secondAttempt := firstAttempt.Add(1 * time.Second)
+	err := s.ConsumePairing(ctx, ConsumePairingInput{
+		DeviceID: "d-replay", PairingCode: "REPLAYCODE", DeviceSecretHash: "hash-2",
+		DeviceInfo: DeviceInfo{Model: "m"}, Now: secondAttempt,
+	})
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodePairingCodeConsumed {
+		t.Fatalf("expected CodePairingCodeConsumed for a replayed-but-not-yet-expired code, got %v", err)
+	}
+
+	// The device must still carry the first attempt's hash, not the
+	// replay's.
+	dev, err := s.GetDeviceForAuth(ctx, "d-replay")
+	if err != nil {
+		t.Fatalf("GetDeviceForAuth: %v", err)
+	}
+	if dev.DeviceSecretHash != "hash-1" {
+		t.Fatalf("replay must not overwrite the device's credentials, got hash %q", dev.DeviceSecretHash)
+	}
+}
+
+// TestConsumePairing_ArchivedDevice_RejectsRepairing is the addition beyond
+// docs/06-auth.md: a device that has been deleted (ARCHIVED) must not be
+// re-pairable even if the attacker still holds a live, unexpired QR.
+func TestConsumePairing_ArchivedDevice_RejectsRepairing(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	consumePairingFixture(t, ctx, s, "d-arch", "ARCHCODE", now)
+
+	if _, err := s.ArchiveDevice(ctx, "d-arch", now.Add(1*time.Second)); err != nil {
+		t.Fatalf("ArchiveDevice: %v", err)
+	}
+
+	err := s.ConsumePairing(ctx, ConsumePairingInput{
+		DeviceID: "d-arch", PairingCode: "ARCHCODE", DeviceSecretHash: "hash",
+		DeviceInfo: DeviceInfo{Model: "m"}, Now: now.Add(2 * time.Second),
+	})
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodeDeviceNotFound {
+		t.Fatalf("expected CodeDeviceNotFound for re-pairing an ARCHIVED device, got %v", err)
+	}
+}
+
+// TestTouchDeviceLatest_ConditionalOnCapturedAt pins expression C and its
+// fallback: an older capturedAt is rejected (latest* unchanged) but
+// lastReceivedAt still advances, and interval comes back via ALL_NEW on
+// both paths.
+func TestTouchDeviceLatest_ConditionalOnCapturedAt(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	dev := Device{
+		PK: deviceKey("d-touch"), SK: deviceKey("d-touch"), EntityType: "Device",
+		DeviceID: "d-touch", OwnerID: "owner-touch", Name: "n", Status: DeviceStatusPaired, Interval: 15,
+		GSI1PK: ownerGSI1PK("owner-touch"), GSI1SK: deviceGSI1SK("d-touch"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	newest := time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC)
+	got, err := s.TouchDeviceLatest(ctx, TouchDeviceLatestInput{
+		DeviceID: "d-touch", ReceivedAt: newest, LatestCapturedAt: newest, LatestThumbnailKey: "thumb/newest",
+	})
+	if err != nil {
+		t.Fatalf("TouchDeviceLatest (newest): %v", err)
+	}
+	if got.LatestThumbnailKey != "thumb/newest" || got.Interval != 15 {
+		t.Fatalf("unexpected device after first touch: %+v", got)
+	}
+
+	// An older, backfilled photo arrives next: latest* must not rewind,
+	// but lastReceivedAt must still advance, and interval must still come
+	// back.
+	older := newest.Add(-1 * time.Hour)
+	receivedAt := newest.Add(1 * time.Minute)
+	got, err = s.TouchDeviceLatest(ctx, TouchDeviceLatestInput{
+		DeviceID: "d-touch", ReceivedAt: receivedAt, LatestCapturedAt: older, LatestThumbnailKey: "thumb/older",
+	})
+	if err != nil {
+		t.Fatalf("TouchDeviceLatest (older, fallback path): %v", err)
+	}
+	if got.LatestThumbnailKey != "thumb/newest" {
+		t.Fatalf("latestThumbnailKey must not rewind to an older photo, got %q", got.LatestThumbnailKey)
+	}
+	if got.LatestCapturedAt != newest.Format(time.RFC3339) {
+		t.Fatalf("latestCapturedAt must not rewind, got %q", got.LatestCapturedAt)
+	}
+	if got.LastReceivedAt != receivedAt.Format(time.RFC3339) {
+		t.Fatalf("lastReceivedAt must advance unconditionally even on the fallback path, got %q", got.LastReceivedAt)
+	}
+	if got.Interval != 15 {
+		t.Fatalf("fallback path must still return interval via ALL_NEW, got %d", got.Interval)
+	}
+
+	// A genuinely newer photo after the backfill must still win.
+	newerStill := newest.Add(1 * time.Hour)
+	got, err = s.TouchDeviceLatest(ctx, TouchDeviceLatestInput{
+		DeviceID: "d-touch", ReceivedAt: newerStill, LatestCapturedAt: newerStill, LatestThumbnailKey: "thumb/newer-still",
+	})
+	if err != nil {
+		t.Fatalf("TouchDeviceLatest (newer still): %v", err)
+	}
+	if got.LatestThumbnailKey != "thumb/newer-still" {
+		t.Fatalf("a genuinely newer photo must update latestThumbnailKey, got %q", got.LatestThumbnailKey)
+	}
+}
+
+// TestTouchDeviceLatest_NonexistentDevice pins the mandatory
+// attribute_exists(PK) guard on both the primary and fallback paths:
+// UpdateItem is an upsert, and device-api has no read permission to check
+// existence first, so a nonexistent device must fail rather than being
+// silently created as an attribute fragment.
+func TestTouchDeviceLatest_NonexistentDevice(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	_, err := s.TouchDeviceLatest(ctx, TouchDeviceLatestInput{
+		DeviceID: "ghost", ReceivedAt: now, LatestCapturedAt: now, LatestThumbnailKey: "thumb/1",
+	})
+	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodeDeviceNotFound {
+		t.Fatalf("expected CodeDeviceNotFound, got %v", err)
+	}
+
+	// Must not have resurrected a fragment.
+	out, err := client.GetItem(ctx, &dynamodb.GetItemInput{
+		TableName: &table,
+		Key:       map[string]types.AttributeValue{"PK": stringAV(deviceKey("ghost")), "SK": stringAV(deviceKey("ghost"))},
+	})
+	if err != nil {
+		t.Fatalf("GetItem: %v", err)
+	}
+	if out.Item != nil {
+		t.Fatalf("TouchDeviceLatest against a nonexistent device must not create one, got %+v", out.Item)
+	}
+}
+
+// TestPutObservation_ReplayIsNoOp pins expression D end to end: a retried
+// Put with the same observationId is a no-op returning success, with
+// exactly one row present.
+func TestPutObservation_ReplayIsNoOp(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	at := time.Date(2026, 6, 15, 9, 0, 0, 0, ids.JST)
+	obsID, err := ids.NewULID(at)
+	if err != nil {
+		t.Fatalf("NewULID: %v", err)
+	}
+	obs := Observation{
+		PK: deviceKey("d-obs2"), SK: observationSK(obsID),
+		EntityType: "Observation", ObservationID: obsID, DeviceID: "d-obs2",
+		CapturedAt: at.Format(time.RFC3339), ImageKey: "img/1", ThumbnailKey: "thumb/1",
+		ExpiresAt: at.Add(24 * time.Hour).Unix(),
+	}
+	if err := s.PutObservation(ctx, obs); err != nil {
+		t.Fatalf("first PutObservation: %v", err)
+	}
+
+	// Retry with the exact same observationId (device resends after a lost
+	// response) — must return nil, not an error.
+	replay := obs
+	replay.ImageKey = "img/should-not-overwrite"
+	if err := s.PutObservation(ctx, replay); err != nil {
+		t.Fatalf("replayed PutObservation must return nil (success), got %v", err)
+	}
+
+	out, err := s.QueryObservationsByDay(ctx, "d-obs2", "2026-06-15")
+	if err != nil {
+		t.Fatalf("QueryObservationsByDay: %v", err)
+	}
+	if len(out) != 1 {
+		t.Fatalf("expected exactly 1 row after a replay, got %d: %+v", len(out), out)
+	}
+	if out[0].ImageKey != "img/1" {
+		t.Fatalf("replay must not overwrite the original row, got imageKey %q", out[0].ImageKey)
+	}
+}
+
+// TestArchiveDevice_RemovesFromOwnerList exercises ArchiveDevice through
+// the Store method (rather than a hand-built fixture) and confirms it has
+// the same structural effect TestListOwnerDevices_ExcludesArchivedDevice
+// pins directly.
+func TestArchiveDevice_RemovesFromOwnerList(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	owner := "owner-archive-method"
+	dev := Device{
+		PK: deviceKey("d-to-archive"), SK: deviceKey("d-to-archive"), EntityType: "Device",
+		DeviceID: "d-to-archive", OwnerID: owner, Name: "n", Status: DeviceStatusPaired, Interval: 5,
+		DeviceSecretHash: "secret", SessionTokenHash: "session",
+		GSI1PK: ownerGSI1PK(owner), GSI1SK: deviceGSI1SK("d-to-archive"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	rows, err := s.ListOwnerDevices(ctx, owner)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("sanity check before archive failed: rows=%+v err=%v", rows, err)
+	}
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	archived, err := s.ArchiveDevice(ctx, "d-to-archive", now)
+	if err != nil {
+		t.Fatalf("ArchiveDevice: %v", err)
+	}
+	if archived.Status != DeviceStatusArchived || archived.GSI1PK != "ARCHIVED" {
+		t.Fatalf("unexpected archived device: %+v", archived)
+	}
+	if archived.DeviceSecretHash != "" || archived.SessionTokenHash != "" {
+		t.Fatalf("ArchiveDevice must also invalidate credentials, got %+v", archived)
+	}
+
+	rows, err = s.ListOwnerDevices(ctx, owner)
+	if err != nil {
+		t.Fatalf("ListOwnerDevices after archive: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("expected the archived device to vanish from the owner's list, got %+v", rows)
+	}
+
+	// Archiving a device that doesn't exist must fail rather than create one.
+	if _, err := s.ArchiveDevice(ctx, "never-existed", now); err == nil {
+		t.Fatal("expected an error archiving a nonexistent device")
+	}
+}
+
+// TestDisconnectDevice_RemovesBothHashes pins the requirement that
+// disconnecting removes BOTH deviceSecretHash and sessionTokenHash — only
+// removing the session token would let the device silently re-obtain a new
+// one via its still-valid deviceSecret.
+func TestDisconnectDevice_RemovesBothHashes_Integration(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	dev := Device{
+		PK: deviceKey("d-disc"), SK: deviceKey("d-disc"), EntityType: "Device",
+		DeviceID: "d-disc", OwnerID: "owner-disc", Name: "n", Status: DeviceStatusPaired, Interval: 5,
+		DeviceSecretHash: "device-secret-hash", SessionTokenHash: "session-token-hash", SessionExpiresAt: 999999,
+		GSI1PK: ownerGSI1PK("owner-disc"), GSI1SK: deviceGSI1SK("d-disc"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	got, err := s.DisconnectDevice(ctx, "d-disc")
+	if err != nil {
+		t.Fatalf("DisconnectDevice: %v", err)
+	}
+	if got.Status != DeviceStatusDisconnected {
+		t.Fatalf("expected status DISCONNECTED, got %s", got.Status)
+	}
+	if got.DeviceSecretHash != "" {
+		t.Fatalf("DisconnectDevice must remove deviceSecretHash, got %q", got.DeviceSecretHash)
+	}
+	if got.SessionTokenHash != "" {
+		t.Fatalf("DisconnectDevice must remove sessionTokenHash, got %q", got.SessionTokenHash)
+	}
+
+	// Disconnecting an ARCHIVED device must fail.
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	if _, err := s.ArchiveDevice(ctx, "d-disc", now); err != nil {
+		t.Fatalf("ArchiveDevice: %v", err)
+	}
+	if _, err := s.DisconnectDevice(ctx, "d-disc"); err == nil {
+		t.Fatal("expected DisconnectDevice on an ARCHIVED device to fail")
+	}
+}
+
+// TestUpdateDeviceProfile_RenamesAndChangesInterval pins the reserved-word
+// escaping (#name, #interval, #status) this method's expression needs.
+func TestUpdateDeviceProfile_RenamesAndChangesInterval(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	dev := Device{
+		PK: deviceKey("d-profile"), SK: deviceKey("d-profile"), EntityType: "Device",
+		DeviceID: "d-profile", OwnerID: "owner-profile", Name: "Old Name", Status: DeviceStatusPaired, Interval: 5,
+		GSI1PK: ownerGSI1PK("owner-profile"), GSI1SK: deviceGSI1SK("d-profile"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	newName := "New Name"
+	newInterval := 15
+	got, err := s.UpdateDeviceProfile(ctx, UpdateDeviceProfileInput{
+		DeviceID: "d-profile", Name: &newName, Interval: &newInterval,
+	})
+	if err != nil {
+		t.Fatalf("UpdateDeviceProfile: %v", err)
+	}
+	if got.Name != "New Name" || got.Interval != 15 {
+		t.Fatalf("unexpected device after update: %+v", got)
+	}
+}
+
+// TestRotateSessionToken_ReplacesRatherThanAdds pins "session per device,
+// rotated on every exchange" (docs/06-auth.md §3).
+func TestRotateSessionToken_ReplacesRatherThanAdds(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	dev := Device{
+		PK: deviceKey("d-rot"), SK: deviceKey("d-rot"), EntityType: "Device",
+		DeviceID: "d-rot", OwnerID: "owner-rot", Name: "n", Status: DeviceStatusPaired, Interval: 5,
+		SessionTokenHash: "old-token-hash", SessionExpiresAt: 1000,
+		GSI1PK: ownerGSI1PK("owner-rot"), GSI1SK: deviceGSI1SK("d-rot"),
+	}
+	putRawItem(t, ctx, client, table, dev)
+
+	got, err := s.RotateSessionToken(ctx, "d-rot", "new-token-hash", 2000)
+	if err != nil {
+		t.Fatalf("RotateSessionToken: %v", err)
+	}
+	if got.SessionTokenHash != "new-token-hash" || got.SessionExpiresAt != 2000 {
+		t.Fatalf("unexpected device after rotate: %+v", got)
+	}
+
+	// A disconnected device must not be handed a session.
+	if _, err := s.DisconnectDevice(ctx, "d-rot"); err != nil {
+		t.Fatalf("DisconnectDevice: %v", err)
+	}
+	if _, err := s.RotateSessionToken(ctx, "d-rot", "another-hash", 3000); err == nil {
+		t.Fatal("expected RotateSessionToken on a DISCONNECTED device to fail")
+	}
+}
+
+// TestCreatePairingSession_ReissuesWithoutRecreatingDevice pins
+// docs/03-web.md §1.8.2: re-issuing a QR writes only a new PairingSession,
+// leaving the Device row (and deviceId) untouched.
+func TestCreatePairingSession_ReissuesWithoutRecreatingDevice(t *testing.T) {
+	ctx := context.Background()
+	client := newIntegrationClient(t)
+	table := createTestTable(t, client)
+	s := New(client, table)
+
+	now := time.Date(2026, 6, 15, 9, 0, 0, 0, time.UTC)
+	consumePairingFixture(t, ctx, s, "d-reissue", "FIRSTCODE", now)
+
+	session, err := s.CreatePairingSession(ctx, CreatePairingSessionInput{
+		DeviceID: "d-reissue", OwnerID: "owner-consume", PairingCode: "SECONDCODE", Now: now.Add(1 * time.Minute),
+	})
+	if err != nil {
+		t.Fatalf("CreatePairingSession: %v", err)
+	}
+	if session.DeviceID != "d-reissue" {
+		t.Fatalf("unexpected session: %+v", session)
+	}
+
+	got, err := s.FindPairingByCode(ctx, "SECONDCODE")
+	if err != nil {
+		t.Fatalf("FindPairingByCode: %v", err)
+	}
+	if got.DeviceID != "d-reissue" {
+		t.Fatalf("unexpected: %+v", got)
+	}
+
+	dev, err := s.GetDeviceForAuth(ctx, "d-reissue")
+	if err != nil {
+		t.Fatalf("GetDeviceForAuth: %v", err)
+	}
+	if dev.Status != DeviceStatusPending {
+		t.Fatalf("re-issuing a QR must not touch the Device row, got %+v", dev)
+	}
+}

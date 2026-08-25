@@ -2,6 +2,22 @@ package store
 
 import "strings"
 
+// Device.Status values (docs/engineering/dynamodb.md §3, docs/06-auth.md
+// §6). Task 7's write methods are the only place these transitions happen;
+// no other package should hardcode these strings.
+const (
+	DeviceStatusPending      = "PENDING"
+	DeviceStatusPaired       = "PAIRED"
+	DeviceStatusDisconnected = "DISCONNECTED"
+	DeviceStatusArchived     = "ARCHIVED"
+)
+
+// PairingSession.Status values (docs/engineering/dynamodb.md §3).
+const (
+	PairingStatusPending  = "PENDING"
+	PairingStatusConsumed = "CONSUMED"
+)
+
 // Device is the full base-table item for a device (docs/engineering/dynamodb.md
 // §3). PK == SK == "DEVICE#<deviceId>" so the authorizer can GetItem from
 // deviceId alone.
@@ -37,6 +53,22 @@ type Device struct {
 	// partition — Task 7's ArchiveDevice).
 	GSI1PK string `dynamodbav:"GSI1PK,omitempty"`
 	GSI1SK string `dynamodbav:"GSI1SK,omitempty"`
+
+	// DeviceInfo is the pairing device's self-reported client details
+	// (docs/06-auth.md §2's { model, osVersion, appVersion }), written by
+	// Task 7's ConsumePairing. Note: docs/engineering/dynamodb.md §3's
+	// Device attribute table does not enumerate this field — a documented
+	// gap in that table — but §6's pairing transaction and the task
+	// brief's expression B both name it explicitly, so it is treated as
+	// authoritative here.
+	DeviceInfo *DeviceInfo `dynamodbav:"deviceInfo,omitempty"`
+}
+
+// DeviceInfo is the nested map attribute described above.
+type DeviceInfo struct {
+	Model      string `dynamodbav:"model,omitempty"`
+	OSVersion  string `dynamodbav:"osVersion,omitempty"`
+	AppVersion string `dynamodbav:"appVersion,omitempty"`
 }
 
 // PairingSession is the full base-table item for a device's pairing session

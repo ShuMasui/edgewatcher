@@ -10,13 +10,21 @@ import (
 // it lets tests substitute a stub or a client pointed at DynamoDB Local
 // without this package importing any HTTP concerns of its own; production
 // code always passes a real *dynamodb.Client, which satisfies this
-// interface. Task 6 only reads, so only GetItem/Query are declared —
-// widening this for Task 7's writes is a small diff in a file Task 7 is
-// already touching, and until then every stub implementing this interface
-// only has to provide the two methods actually exercised.
+// interface. Task 7 widens this beyond Task 6's GetItem/Query with the four
+// write operations the docs require: PutItem (CreatePairingSession),
+// UpdateItem (TouchDeviceLatest, DisconnectDevice, ArchiveDevice, ...) and
+// TransactWriteItems (CreateDeviceWithPairing, ConsumePairing). This is
+// still a strict subset of *dynamodb.Client — no DeleteItem, no batch APIs —
+// matching the IAM ceilings in docs/05-backend.md §2.4 (G3): no single
+// production caller of this package is ever given more than its own
+// function's IAM policy allows, but the interface itself is shared across
+// all of them since Store has one implementation.
 type DynamoDBAPI interface {
 	GetItem(ctx context.Context, params *dynamodb.GetItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.GetItemOutput, error)
 	Query(ctx context.Context, params *dynamodb.QueryInput, optFns ...func(*dynamodb.Options)) (*dynamodb.QueryOutput, error)
+	PutItem(ctx context.Context, params *dynamodb.PutItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.PutItemOutput, error)
+	UpdateItem(ctx context.Context, params *dynamodb.UpdateItemInput, optFns ...func(*dynamodb.Options)) (*dynamodb.UpdateItemOutput, error)
+	TransactWriteItems(ctx context.Context, params *dynamodb.TransactWriteItemsInput, optFns ...func(*dynamodb.Options)) (*dynamodb.TransactWriteItemsOutput, error)
 }
 
 // Store is the DynamoDB access layer. It holds no state beyond a client and

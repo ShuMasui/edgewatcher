@@ -88,3 +88,36 @@ func (s *Store) GetObservation(ctx context.Context, deviceID, observationID stri
 	}
 	return &o, nil
 }
+
+// PutObservation implements the observation-write half of POST
+// /device/uploads (docs/05-backend.md §1.3, §2.6). It is idempotent by
+// construction: observationId is a ULID the device itself generates and
+// resends unchanged on retry (the device, not the server, owns the ID —
+// otherwise a retry after a lost response would mint a new ID and record a
+// duplicate). ConditionExpression: attribute_not_exists(SK) makes a
+// duplicate Put a no-op.
+//
+// A ConditionalCheckFailedException here is SUCCESS, not an error: it means
+// this exact observationId was already recorded — a replay of a request
+// whose response the device never received — so PutObservation returns nil
+// rather than propagating the SDK error. Any other error is genuinely
+// unexpected and is wrapped as CodeInternal.
+func (s *Store) PutObservation(ctx context.Context, obs Observation) error {
+	item, err := attributevalue.MarshalMap(obs)
+	if err != nil {
+		return wrapInternal("PutObservation: marshal", err)
+	}
+
+	_, err = s.client.PutItem(ctx, &dynamodb.PutItemInput{
+		TableName:           &s.table,
+		Item:                item,
+		ConditionExpression: strPtr("attribute_not_exists(SK)"),
+	})
+	if err != nil {
+		if isConditionalCheckFailed(err) {
+			return nil
+		}
+		return wrapInternal("PutObservation", err)
+	}
+	return nil
+}
