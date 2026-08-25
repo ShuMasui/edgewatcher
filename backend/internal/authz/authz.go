@@ -21,9 +21,7 @@ package authz
 
 import (
 	"context"
-	"crypto/sha256"
 	"crypto/subtle"
-	"encoding/hex"
 	"log/slog"
 	"strings"
 	"time"
@@ -32,9 +30,17 @@ import (
 
 	"github.com/ShuMasui/edgewatcher/backend/internal/clock"
 	"github.com/ShuMasui/edgewatcher/backend/internal/store"
+	"github.com/ShuMasui/edgewatcher/backend/internal/tokens"
 )
 
-// bearerPrefix is the only accepted Authorization scheme.
+// bearerPrefix is an optional, tolerated prefix. docs/06-auth.md §3 and
+// docs/05-backend.md §1.1 both specify the device session header as a
+// bare token — "Authorization: <sessionToken>" — with no scheme. The
+// "Bearer " convention belongs to the separate Cognito/JWT path used by
+// the web client (web/src/services/api-client.ts), not this one. Stripping
+// an optional "Bearer " prefix, rather than rejecting it, costs nothing:
+// a sessionToken is "<deviceId>.<random>" with a ULID deviceId, which can
+// never collide with the literal string "Bearer".
 const bearerPrefix = "Bearer "
 
 // DeviceGetter is the subset of *store.Store this package depends on. It
@@ -62,18 +68,6 @@ func New(s DeviceGetter, c clock.Clock, logger *slog.Logger) *Authorizer {
 	return &Authorizer{store: s, clock: c, logger: logger}
 }
 
-// HashSessionToken renders token as the lowercase-hex SHA-256 digest
-// stored in Device.SessionTokenHash (docs/06-auth.md §3: "ハッシュは
-// SHA-256 で足りる" — a 256-bit random token has no offline-guessing
-// surface, so a slow KDF buys nothing here). Whichever code path issues a
-// session (POST /device/token, a later task) must hash the token with
-// this exact function before calling store.RotateSessionToken, or every
-// session this authorizer is asked to validate will mismatch.
-func HashSessionToken(token string) string {
-	sum := sha256.Sum256([]byte(token))
-	return hex.EncodeToString(sum[:])
-}
-
 // deny is the single not-authorized value every rejection path returns.
 // Named so every "return deny(...)" call site reads as an explicit,
 // deliberate denial rather than an easily-overlooked zero value.
@@ -89,8 +83,9 @@ func deny() events.APIGatewayV2CustomAuthorizerSimpleResponse {
 // Go error from an authorizer Lambda.
 //
 // Authorization requires all of:
-//  1. the lowercase "authorization" header is present and is exactly
-//     "Bearer <token>" with a non-empty token (payload format 2.0 always
+//  1. the lowercase "authorization" header is present and holds a
+//     non-empty token — the bare token per docs/06-auth.md §3, with an
+//     optional "Bearer " prefix tolerated (payload format 2.0 always
 //     lowercases header names; there is no "Authorization" key to fall
 //     back to on a real request)
 //  2. the token's deviceId prefix (docs/06-auth.md §3: sessionToken is
@@ -112,6 +107,15 @@ func (a *Authorizer) Authorize(ctx context.Context, req events.APIGatewayV2Custo
 	dev, err := a.store.GetDeviceForAuth(ctx, deviceID)
 	if err != nil {
 		a.log(ctx, "authz: rejected", "reason", "device_lookup_failed", "deviceId", deviceID, "error", err.Error())
+		return deny(), nil
+	}
+	if dev == nil {
+		// DeviceGetter is a public interface; store.GetDeviceForAuth never
+		// returns (nil, nil) today, but nothing stops another
+		// implementation (or a future refactor of this one) from doing
+		// so. Without this guard that shape would panic on dev.Status
+		// below, turning a deny into a 500 instead.
+		a.log(ctx, "authz: rejected", "reason", "device_lookup_nil", "deviceId", deviceID)
 		return deny(), nil
 	}
 
@@ -142,20 +146,23 @@ func (a *Authorizer) Authorize(ctx context.Context, req events.APIGatewayV2Custo
 	}, nil
 }
 
-// extractToken reads the bearer token from the lowercase "authorization"
-// header and splits it into (token, deviceId). It reports ok=false for a
-// nil header map, a missing key, anything not of the exact shape
-// "Bearer <token>", an empty token, or a token with no "<deviceId>."
-// prefix to key the GetItem on.
+// extractToken reads the session token from the lowercase "authorization"
+// header and splits it into (token, deviceId). The primary, documented
+// wire format (docs/06-auth.md §3, docs/05-backend.md §1.1) is a bare
+// token with no scheme; an optional "Bearer " prefix is tolerated and
+// stripped if present, since a real sessionToken ("<deviceId>.<random>"
+// with a ULID deviceId) can never equal or start with that literal
+// string.
+//
+// It reports ok=false for a nil header map, a missing key, an empty
+// token (after stripping any "Bearer " prefix), or a token with no
+// "<deviceId>." prefix to key the GetItem on.
 func extractToken(headers map[string]string) (token, deviceID string, ok bool) {
 	if headers == nil {
 		return "", "", false
 	}
 	raw, present := headers["authorization"]
 	if !present {
-		return "", "", false
-	}
-	if !strings.HasPrefix(raw, bearerPrefix) {
 		return "", "", false
 	}
 	token = strings.TrimPrefix(raw, bearerPrefix)
@@ -173,15 +180,23 @@ func extractToken(headers map[string]string) (token, deviceID string, ok bool) {
 // validHash reports whether token hashes to storedHash, compared in
 // constant time so response-timing cannot be used to recover the hash
 // (and, transitively, brute-force the token) one byte at a time.
-// subtle.ConstantTimeCompare itself reports unequal (in non-constant time)
-// on a length mismatch, which is safe here: length alone reveals nothing
-// about the secret's content, only that a fixed-width SHA-256 hex digest
-// wasn't supplied.
+// subtle.ConstantTimeCompare reports unequal on a length mismatch too,
+// which is output-equivalent to bytes.Equal/== for every input here —
+// the timing difference between the two is real but is not something a
+// functional test can observe (see authz_test.go's note on this).
+//
+// The storedHash == "" guard is defensive rather than load-bearing today
+// (a disconnected/archived device has no hash and already fails the
+// PAIRED check above), but it is pinned by
+// TestAuthorize_DisconnectedDeviceEmptyHash: an empty stored hash must
+// never validate against anything, including another empty string,
+// regardless of what future refactors do to the caller's ordering of
+// checks.
 func validHash(token, storedHash string) bool {
 	if storedHash == "" {
 		return false
 	}
-	got := HashSessionToken(token)
+	got := tokens.HashSessionToken(token)
 	return subtle.ConstantTimeCompare([]byte(got), []byte(storedHash)) == 1
 }
 
