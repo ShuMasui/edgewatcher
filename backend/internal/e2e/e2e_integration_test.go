@@ -543,6 +543,7 @@ func pairAndAuthorize(t *testing.T, st *stack, owner string) (string, map[string
 	}
 	authContext := authResp.Context
 	authContext["sessionToken"] = sessionToken
+	authContext["deviceSecret"] = pair.DeviceSecret
 	return pair.DeviceID, authContext
 }
 
@@ -557,4 +558,198 @@ func withQuery(req events.APIGatewayV2HTTPRequest, key, value string) events.API
 	}
 	req.QueryStringParameters[key] = value
 	return req
+}
+
+// TestQRPath_DisconnectThenRePairKeepsTheHistory is the claim docs/03-web.md
+// §1.8.3 makes to the owner: replacing or factory-resetting the Android
+// phone keeps the observation point intact, because the deviceId never
+// changes. Nothing short of running the whole loop can show that — the
+// credentials are minted twice, by two different pairings, and the history
+// has to survive both.
+//
+// It also walks the self-repair loop of docs/06-auth.md §5 in order:
+// disconnect, upload denied, token refresh ALSO denied (which is what tells
+// the device to wipe and show the QR again), re-pair, back online.
+func TestQRPath_DisconnectThenRePairKeepsTheHistory(t *testing.T) {
+	st := newStack(t)
+	ctx := context.Background()
+	const owner = "owner-repair"
+	deviceID, authContext := pairAndAuthorize(t, st, owner)
+	firstSecret := authContext["deviceSecret"].(string)
+
+	// A photo from before the disconnection.
+	beforeReq, beforeObsID := uploadRequest(t, authContext, st.clock.Now().Add(-time.Minute))
+	if _, err := st.device.Upload(ctx, beforeReq); err != nil {
+		t.Fatalf("upload before disconnect: %v", err)
+	}
+
+	// The owner disconnects from the web.
+	if _, err := st.web.DisconnectDevice(ctx, withPath(ownerReq(owner), deviceID)); err != nil {
+		t.Fatalf("POST /devices/{id}/disconnect: %v", err)
+	}
+
+	// The session dies on the next request — no cache to wait out.
+	authResp, err := st.authz.Authorize(ctx, events.APIGatewayV2CustomAuthorizerV2Request{
+		Headers: map[string]string{"authorization": authContext["sessionToken"].(string)},
+	})
+	if err != nil {
+		t.Fatalf("authorize after disconnect: %v", err)
+	}
+	if authResp.IsAuthorized {
+		t.Fatal("a disconnected device was still authorized")
+	}
+
+	// And the refresh it would try next is refused too. This is the step
+	// that matters: if the deviceSecret still worked, the device would
+	// silently re-obtain a session and the disconnect would not hold
+	// (docs/06-auth.md §6).
+	if _, err := st.auth.Token(ctx, events.APIGatewayV2HTTPRequest{
+		Body: `{"deviceId":"` + deviceID + `","deviceSecret":"` + firstSecret + `"}`,
+	}); err == nil {
+		t.Fatal("a disconnected device refreshed its session with the old deviceSecret")
+	}
+
+	// The owner re-issues a QR. No new Device row: same deviceId.
+	reissued, err := st.web.CreatePairingSession(ctx, withPath(ownerReq(owner), deviceID))
+	if err != nil {
+		t.Fatalf("POST /devices/{id}/pairing-sessions: %v", err)
+	}
+	newCode := body[api.PairingSession](t, reissued).PairingCode
+
+	paired, err := st.auth.Pair(ctx, events.APIGatewayV2HTTPRequest{
+		Body: `{"pairingCode":"` + newCode + `","deviceInfo":{"model":"Pixel 9"}}`,
+	})
+	if err != nil {
+		t.Fatalf("re-pair: %v", err)
+	}
+	repair := body[deviceauth.PairResponse](t, paired)
+	if repair.DeviceID != deviceID {
+		t.Fatalf("re-pairing produced deviceId %q, want the original %q — the history would be orphaned", repair.DeviceID, deviceID)
+	}
+	if repair.DeviceSecret == firstSecret {
+		t.Fatal("re-pairing reissued the same deviceSecret; the disconnected credential must not come back")
+	}
+
+	tokenResp, err := st.auth.Token(ctx, events.APIGatewayV2HTTPRequest{
+		Body: `{"deviceId":"` + deviceID + `","deviceSecret":"` + repair.DeviceSecret + `"}`,
+	})
+	if err != nil {
+		t.Fatalf("token after re-pair: %v", err)
+	}
+	newAuth, err := st.authz.Authorize(ctx, events.APIGatewayV2CustomAuthorizerV2Request{
+		Headers: map[string]string{"authorization": body[deviceauth.TokenResponse](t, tokenResp).SessionToken},
+	})
+	if err != nil || !newAuth.IsAuthorized {
+		t.Fatalf("the re-paired device was not authorized (err=%v)", err)
+	}
+
+	// A photo from after. Both must be in the same day's history.
+	st.clock.advance(time.Minute)
+	afterReq, afterObsID := uploadRequest(t, newAuth.Context, st.clock.Now().Add(-30*time.Second))
+	if _, err := st.device.Upload(ctx, afterReq); err != nil {
+		t.Fatalf("upload after re-pair: %v", err)
+	}
+
+	obsResp, err := st.web.ListObservations(ctx, withQuery(withPath(ownerReq(owner), deviceID), "date", "2026-09-08"))
+	if err != nil {
+		t.Fatalf("GET observations: %v", err)
+	}
+	seen := map[string]bool{}
+	for _, o := range body[[]api.Observation](t, obsResp) {
+		seen[o.ObservationID] = true
+	}
+	if !seen[beforeObsID] {
+		t.Error("the photo taken before the disconnection is gone from the history")
+	}
+	if !seen[afterObsID] {
+		t.Error("the photo taken after re-pairing is missing from the history")
+	}
+}
+
+// TestQRPath_DeleteRemovesTheDeviceAndFreesTheQuota covers the logical
+// delete of docs/06-auth.md §6 through the two consequences an owner can
+// actually observe: the device leaves the list, and the slot it occupied
+// becomes available again (docs/03-web.md §1.9's "3 / 10 台").
+//
+// The quota half is the one worth running for real: it holds only because
+// ArchiveDevice swaps GSI1PK into the ARCHIVED partition, so the row leaves
+// the GSI1 query that the limit counts. A FilterExpression, or a status
+// check the count forgot, would both pass unit tests over a fake.
+func TestQRPath_DeleteRemovesTheDeviceAndFreesTheQuota(t *testing.T) {
+	st := newStack(t)
+	ctx := context.Background()
+	const owner = "owner-delete"
+	deviceID, authContext := pairAndAuthorize(t, st, owner)
+
+	req, _ := uploadRequest(t, authContext, st.clock.Now().Add(-time.Minute))
+	if _, err := st.device.Upload(ctx, req); err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+
+	resp, err := st.web.DeleteDevice(ctx, withPath(ownerReq(owner), deviceID))
+	if err != nil {
+		t.Fatalf("DELETE /devices/{id}: %v", err)
+	}
+	if resp.StatusCode != 204 {
+		t.Errorf("status = %d, want 204", resp.StatusCode)
+	}
+
+	listed, err := st.web.ListDevices(ctx, ownerReq(owner))
+	if err != nil {
+		t.Fatalf("GET /devices: %v", err)
+	}
+	if devices := body[[]api.Device](t, listed); len(devices) != 0 {
+		t.Fatalf("deleted device still in the list: %+v", devices)
+	}
+
+	// Its credentials died with it, even though the row survives.
+	authResp, err := st.authz.Authorize(ctx, events.APIGatewayV2CustomAuthorizerV2Request{
+		Headers: map[string]string{"authorization": authContext["sessionToken"].(string)},
+	})
+	if err != nil {
+		t.Fatalf("authorize after delete: %v", err)
+	}
+	if authResp.IsAuthorized {
+		t.Fatal("a deleted device was still authorized")
+	}
+
+	// And the owner can add a device again in the freed slot.
+	if _, err := st.web.CreateDevice(ctx, func() events.APIGatewayV2HTTPRequest {
+		r := ownerReq(owner)
+		r.Body = `{"name":"入れ替え"}`
+		return r
+	}()); err != nil {
+		t.Fatalf("creating a device after a delete freed a slot: %v", err)
+	}
+}
+
+// TestQRPath_IntervalChangeReachesTheDevice closes the configuration loop of
+// docs/05-backend.md §3.4: the server never pushes, so an interval the owner
+// picks in the browser only takes effect when the device next uploads and
+// reads nextConfig off the response. The value has to survive a PATCH, a
+// DynamoDB round trip, and TouchDeviceLatest's ALL_NEW return to get there.
+func TestQRPath_IntervalChangeReachesTheDevice(t *testing.T) {
+	st := newStack(t)
+	ctx := context.Background()
+	const owner = "owner-interval"
+	deviceID, authContext := pairAndAuthorize(t, st, owner)
+
+	patch := withPath(ownerReq(owner), deviceID)
+	patch.Body = `{"interval":15,"name":"玄関(15分)"}`
+	updated, err := st.web.UpdateDevice(ctx, patch)
+	if err != nil {
+		t.Fatalf("PATCH /devices/{id}: %v", err)
+	}
+	if got := body[api.Device](t, updated); got.Interval != 15 || got.Name != "玄関(15分)" {
+		t.Fatalf("PATCH returned %+v, want interval 15 and the new name", got)
+	}
+
+	req, _ := uploadRequest(t, authContext, st.clock.Now().Add(-time.Minute))
+	uploaded, err := st.device.Upload(ctx, req)
+	if err != nil {
+		t.Fatalf("upload: %v", err)
+	}
+	if got := body[deviceapi.UploadResponse](t, uploaded); got.NextConfig.IntervalMinutes != 15 {
+		t.Errorf("nextConfig.intervalMinutes = %d, want the 15 the owner chose", got.NextConfig.IntervalMinutes)
+	}
 }

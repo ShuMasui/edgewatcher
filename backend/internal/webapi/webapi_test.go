@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -38,6 +39,10 @@ type fakeStore struct {
 
 	created  []store.CreateDeviceWithPairingInput
 	sessions []store.CreatePairingSessionInput
+
+	disconnected []string
+	updated      []store.UpdateDeviceProfileInput
+	archived     []string
 }
 
 func (f *fakeStore) ListOwnerDevices(_ context.Context, _ string) ([]store.OwnerListRow, error) {
@@ -89,6 +94,50 @@ func (f *fakeStore) CreatePairingSession(_ context.Context, in store.CreatePairi
 		DeviceID: in.DeviceID, OwnerID: in.OwnerID, PairingCode: in.PairingCode,
 		Status: store.PairingStatusPending, ExpiresAt: in.Now.Add(5 * time.Minute).Unix(),
 	}, nil
+}
+
+func (f *fakeStore) DisconnectDevice(_ context.Context, deviceID string) (*store.Device, error) {
+	f.disconnected = append(f.disconnected, deviceID)
+	dev, ok := f.devices[deviceID]
+	if !ok {
+		return nil, apierr.New(apierr.CodeDeviceNotFound, "device not found")
+	}
+	updated := *dev
+	updated.Status = store.DeviceStatusDisconnected
+	updated.DeviceSecretHash = ""
+	updated.SessionTokenHash = ""
+	f.devices[deviceID] = &updated
+	return &updated, nil
+}
+
+func (f *fakeStore) UpdateDeviceProfile(_ context.Context, in store.UpdateDeviceProfileInput) (*store.Device, error) {
+	f.updated = append(f.updated, in)
+	dev, ok := f.devices[in.DeviceID]
+	if !ok {
+		return nil, apierr.New(apierr.CodeDeviceNotFound, "device not found")
+	}
+	updated := *dev
+	if in.Name != nil {
+		updated.Name = *in.Name
+	}
+	if in.Interval != nil {
+		updated.Interval = *in.Interval
+	}
+	f.devices[in.DeviceID] = &updated
+	return &updated, nil
+}
+
+func (f *fakeStore) ArchiveDevice(_ context.Context, deviceID string, now time.Time) (*store.Device, error) {
+	f.archived = append(f.archived, deviceID)
+	dev, ok := f.devices[deviceID]
+	if !ok {
+		return nil, apierr.New(apierr.CodeDeviceNotFound, "device not found")
+	}
+	updated := *dev
+	updated.Status = store.DeviceStatusArchived
+	updated.ArchivedAt = now.UTC().Format(time.RFC3339)
+	f.devices[deviceID] = &updated
+	return &updated, nil
 }
 
 func newHandler(f *fakeStore) *Handler {
@@ -338,6 +387,8 @@ func TestOwnership(t *testing.T) {
 		"observations":   h.ListObservations,
 		"latest pairing": h.LatestPairingSession,
 		"new pairing":    h.CreatePairingSession,
+		"disconnect":     h.DisconnectDevice,
+		"delete":         h.DeleteDevice,
 	}
 	for name, handler := range routes {
 		t.Run(name+"/someone else's device", func(t *testing.T) {
@@ -734,6 +785,9 @@ func TestRegister(t *testing.T) {
 		"GET /devices/{id}/pairing-sessions/latest",
 		"GET /devices/{id}/observations",
 		"GET /observations/{id}/image",
+		"POST /devices/{id}/disconnect",
+		"PATCH /devices/{id}",
+		"DELETE /devices/{id}",
 	} {
 		req := ownerRequest("owner-1")
 		req.RouteKey = routeKey
@@ -744,5 +798,279 @@ func TestRegister(t *testing.T) {
 		if strings.Contains(resp.Body, "ROUTE_NOT_WIRED") {
 			t.Errorf("%s is not registered", routeKey)
 		}
+	}
+}
+
+// --- POST /devices/{id}/disconnect ---------------------------------------
+
+// TestDisconnectDevice covers docs/06-auth.md §6's セッション切断. The
+// response is the narrow {deviceId, status} of api.ts's
+// DisconnectDeviceResponse rather than a full Device: the row in the web's
+// list is patched from it, and returning a whole Device here would invite
+// the client to overwrite fields this operation did not touch.
+func TestDisconnectDevice(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {
+			DeviceID: "dev-1", OwnerID: "owner-1", Name: "玄関",
+			Status: store.DeviceStatusPaired, Interval: 5,
+			DeviceSecretHash: "secret-hash", SessionTokenHash: "session-hash",
+		},
+	}}
+	req := withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"})
+
+	resp, err := newHandler(f).DisconnectDevice(context.Background(), req)
+	if err != nil {
+		t.Fatalf("DisconnectDevice: %v", err)
+	}
+	got := decodeBody[DisconnectDeviceResponse](t, resp)
+	if got.DeviceID != "dev-1" {
+		t.Errorf("deviceId = %q, want dev-1", got.DeviceID)
+	}
+	if got.Status != store.DeviceStatusDisconnected {
+		t.Errorf("status = %q, want DISCONNECTED", got.Status)
+	}
+	if len(f.disconnected) != 1 || f.disconnected[0] != "dev-1" {
+		t.Errorf("disconnected = %v, want [dev-1]", f.disconnected)
+	}
+}
+
+// TestDisconnectDevice_ReportsTheStoredStatus, not a hardcoded string. The
+// status the client renders must be the one the write actually produced —
+// echoing a constant would report DISCONNECTED even if the update wrote
+// something else, which is precisely the class of bug an owner would only
+// discover by refreshing.
+func TestDisconnectDevice_ReportsTheStoredStatus(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"})
+
+	if _, err := newHandler(f).DisconnectDevice(context.Background(), req); err != nil {
+		t.Fatalf("DisconnectDevice: %v", err)
+	}
+	if got := f.devices["dev-1"]; got.DeviceSecretHash != "" || got.SessionTokenHash != "" {
+		t.Errorf("device still holds credentials after disconnect: %+v", got)
+	}
+}
+
+// --- PATCH /devices/{id} -------------------------------------------------
+
+// TestUpdateDevice_Name renames a device and returns the complete Device
+// (api.ts: UpdateDeviceResponse = Device), so the list row can be replaced
+// wholesale rather than merged field by field.
+func TestUpdateDevice_Name(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Name: "玄関", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}), `{"name":"裏口"}`)
+
+	resp, err := newHandler(f).UpdateDevice(context.Background(), req)
+	if err != nil {
+		t.Fatalf("UpdateDevice: %v", err)
+	}
+	got := decodeBody[api.Device](t, resp)
+	if got.Name != "裏口" {
+		t.Errorf("name = %q, want 裏口", got.Name)
+	}
+	if got.Interval != 5 {
+		t.Errorf("interval = %d, want the untouched 5", got.Interval)
+	}
+	if len(f.updated) != 1 {
+		t.Fatalf("UpdateDeviceProfile called %d times, want 1", len(f.updated))
+	}
+	// Interval must be nil, not a zero int: PATCH changes only what was
+	// sent, and a non-nil zero here would write interval = 0 and stop the
+	// device uploading.
+	if f.updated[0].Interval != nil {
+		t.Errorf("Interval = %v, want nil for a name-only PATCH", *f.updated[0].Interval)
+	}
+	if f.updated[0].Name == nil || *f.updated[0].Name != "裏口" {
+		t.Errorf("Name = %v, want 裏口", f.updated[0].Name)
+	}
+}
+
+func TestUpdateDevice_Interval(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Name: "玄関", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}), `{"interval":15}`)
+
+	resp, err := newHandler(f).UpdateDevice(context.Background(), req)
+	if err != nil {
+		t.Fatalf("UpdateDevice: %v", err)
+	}
+	if got := decodeBody[api.Device](t, resp); got.Interval != 15 || got.Name != "玄関" {
+		t.Errorf("device = %+v, want interval 15 and the untouched name", got)
+	}
+	if f.updated[0].Name != nil {
+		t.Errorf("Name = %v, want nil for an interval-only PATCH", *f.updated[0].Name)
+	}
+}
+
+// TestUpdateDevice_RejectsIntervalsOutsideTheOfferedSet. The set is
+// api.IntervalOptions — the same list GET /app-config hands the client's
+// <select> — so the two cannot drift. An unvalidated interval reaches the
+// device through nextConfig and becomes its actual upload cadence, so
+// accepting 0 or 1440 here would either hammer the API or silently stop a
+// camera.
+func TestUpdateDevice_RejectsIntervalsOutsideTheOfferedSet(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	for _, bad := range []string{`{"interval":0}`, `{"interval":1}`, `{"interval":7}`, `{"interval":60}`, `{"interval":-5}`} {
+		t.Run(bad, func(t *testing.T) {
+			req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}), bad)
+			_, err := newHandler(f).UpdateDevice(context.Background(), req)
+			assertCode(t, err, apierr.CodeValidation)
+		})
+	}
+	if len(f.updated) != 0 {
+		t.Errorf("a rejected PATCH still reached the store: %+v", f.updated)
+	}
+}
+
+// TestUpdateDevice_AcceptsEveryOfferedInterval is the other half: whatever
+// GET /app-config advertises must actually be accepted here, or the web
+// offers a choice the server refuses.
+func TestUpdateDevice_AcceptsEveryOfferedInterval(t *testing.T) {
+	for _, interval := range api.IntervalOptions {
+		f := &fakeStore{devices: map[string]*store.Device{
+			"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+		}}
+		req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}),
+			`{"interval":`+strconv.Itoa(interval)+`}`)
+		if _, err := newHandler(f).UpdateDevice(context.Background(), req); err != nil {
+			t.Errorf("interval %d is offered by /app-config but rejected by PATCH: %v", interval, err)
+		}
+	}
+}
+
+// TestUpdateDevice_EmptyPatchIsRejected. An empty body is a client bug, and
+// forwarding it would reach UpdateDeviceProfile's own "no fields to update"
+// guard — a 400 either way, but only after a pointless round trip to
+// DynamoDB.
+func TestUpdateDevice_EmptyPatchIsRejected(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	for _, body := range []string{`{}`, `{"name":null,"interval":null}`} {
+		req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}), body)
+		_, err := newHandler(f).UpdateDevice(context.Background(), req)
+		assertCode(t, err, apierr.CodeValidation)
+	}
+	if len(f.updated) != 0 {
+		t.Errorf("an empty PATCH reached the store: %+v", f.updated)
+	}
+}
+
+// TestUpdateDevice_RejectsBlankName: a device with a blank name is an
+// unidentifiable row in the list, the same reason POST /devices requires
+// one (docs/03-web.md §1.8.1).
+func TestUpdateDevice_RejectsBlankName(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	for _, body := range []string{`{"name":""}`, `{"name":"   "}`, `{"name":"\t\n"}`} {
+		req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}), body)
+		_, err := newHandler(f).UpdateDevice(context.Background(), req)
+		assertCode(t, err, apierr.CodeValidation)
+	}
+}
+
+// TestUpdateDevice_TrimsTheName keeps a name the owner typed with a stray
+// space from sorting apart from the same name typed without one.
+func TestUpdateDevice_TrimsTheName(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}), `{"name":"  裏口  "}`)
+	if _, err := newHandler(f).UpdateDevice(context.Background(), req); err != nil {
+		t.Fatalf("UpdateDevice: %v", err)
+	}
+	if *f.updated[0].Name != "裏口" {
+		t.Errorf("stored name = %q, want it trimmed", *f.updated[0].Name)
+	}
+}
+
+func TestUpdateDevice_MalformedBody(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"}), `{ not json`)
+	_, err := newHandler(f).UpdateDevice(context.Background(), req)
+	assertCode(t, err, apierr.CodeValidation)
+}
+
+// TestUpdateDevice_OwnershipIsCheckedBeforeTheBody. The ownership check has
+// to come first: validating someone else's PATCH body and reporting "bad
+// interval" would confirm the device exists before ever proving the caller
+// may touch it.
+func TestUpdateDevice_OwnershipIsCheckedBeforeTheBody(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"other": {DeviceID: "other", OwnerID: "owner-2", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withBody(withPath(ownerRequest("owner-1"), map[string]string{"id": "other"}), `{"interval":999}`)
+	_, err := newHandler(f).UpdateDevice(context.Background(), req)
+	assertCode(t, err, apierr.CodeForbidden)
+}
+
+// --- DELETE /devices/{id} ------------------------------------------------
+
+// TestDeleteDevice_204 covers the logical delete of docs/06-auth.md §6.
+// 204 with no body is what api-client.ts expects — it synthesizes
+// {success:true} client-side rather than reading one from us.
+func TestDeleteDevice_204(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"})
+
+	resp, err := newHandler(f).DeleteDevice(context.Background(), req)
+	if err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+	if resp.StatusCode != 204 {
+		t.Errorf("status = %d, want 204", resp.StatusCode)
+	}
+	if resp.Body != nil {
+		t.Errorf("body = %v, want none", resp.Body)
+	}
+	if len(f.archived) != 1 || f.archived[0] != "dev-1" {
+		t.Errorf("archived = %v, want [dev-1]", f.archived)
+	}
+	if f.devices["dev-1"].Status != store.DeviceStatusArchived {
+		t.Errorf("status = %q, want ARCHIVED", f.devices["dev-1"].Status)
+	}
+}
+
+// TestDeleteDevice_UsesTheHandlerClock so archivedAt agrees with every other
+// timestamp in the same request rather than with time.Now() somewhere deep
+// in the store.
+func TestDeleteDevice_UsesTheHandlerClock(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusPaired, Interval: 5},
+	}}
+	req := withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"})
+	if _, err := newHandler(f).DeleteDevice(context.Background(), req); err != nil {
+		t.Fatalf("DeleteDevice: %v", err)
+	}
+	if want := fixedNow.Format(time.RFC3339); f.devices["dev-1"].ArchivedAt != want {
+		t.Errorf("archivedAt = %q, want %q", f.devices["dev-1"].ArchivedAt, want)
+	}
+}
+
+// TestDeleteDevice_AlreadyDeletedIs404. loadOwnedDevice treats ARCHIVED as
+// absent, so a second DELETE is a 404 rather than a silent success. The
+// device is not in the owner's list to delete twice from; a 204 here would
+// claim we archived a row this call never touched.
+func TestDeleteDevice_AlreadyDeletedIs404(t *testing.T) {
+	f := &fakeStore{devices: map[string]*store.Device{
+		"dev-1": {DeviceID: "dev-1", OwnerID: "owner-1", Status: store.DeviceStatusArchived, Interval: 5},
+	}}
+	req := withPath(ownerRequest("owner-1"), map[string]string{"id": "dev-1"})
+	_, err := newHandler(f).DeleteDevice(context.Background(), req)
+	assertCode(t, err, apierr.CodeDeviceNotFound)
+	if len(f.archived) != 0 {
+		t.Errorf("ArchiveDevice was called for an already-archived device: %v", f.archived)
 	}
 }

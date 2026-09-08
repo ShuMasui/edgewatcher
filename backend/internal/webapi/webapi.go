@@ -12,8 +12,10 @@ package webapi
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/aws/aws-lambda-go/events"
 
@@ -38,6 +40,9 @@ type Store interface {
 	GetObservation(ctx context.Context, deviceID, observationID string) (*store.Observation, error)
 	CreateDeviceWithPairing(ctx context.Context, in store.CreateDeviceWithPairingInput) (*store.Device, *store.PairingSession, error)
 	CreatePairingSession(ctx context.Context, in store.CreatePairingSessionInput) (*store.PairingSession, error)
+	DisconnectDevice(ctx context.Context, deviceID string) (*store.Device, error)
+	UpdateDeviceProfile(ctx context.Context, in store.UpdateDeviceProfileInput) (*store.Device, error)
+	ArchiveDevice(ctx context.Context, deviceID string, now time.Time) (*store.Device, error)
 }
 
 // Config is the environment-derived settings this package needs
@@ -71,6 +76,9 @@ func (h *Handler) Register(rt *httpx.Router) {
 	rt.Handle("GET /devices/{id}/pairing-sessions/latest", h.LatestPairingSession)
 	rt.Handle("GET /devices/{id}/observations", h.ListObservations)
 	rt.Handle("GET /observations/{id}/image", h.ObservationImage)
+	rt.Handle("POST /devices/{id}/disconnect", h.DisconnectDevice)
+	rt.Handle("PATCH /devices/{id}", h.UpdateDevice)
+	rt.Handle("DELETE /devices/{id}", h.DeleteDevice)
 }
 
 // CreateDeviceResponse is POST /devices' body (api.ts:
@@ -323,6 +331,170 @@ func (h *Handler) ObservationImage(ctx context.Context, req events.APIGatewayV2H
 		ImageURL:      signed.URL,
 		ExpiresAt:     signed.ExpiresAt,
 	}}, nil
+}
+
+// DisconnectDeviceResponse is POST /devices/{id}/disconnect's body (api.ts:
+// DisconnectDeviceResponse).
+//
+// It is deliberately narrower than a full Device. The web patches the
+// affected row from it, and returning a whole Device would invite a client
+// to overwrite fields this operation never touched — a stale interval or
+// thumbnail arriving back as if it were fresh.
+type DisconnectDeviceResponse struct {
+	DeviceID string `json:"deviceId"`
+	Status   string `json:"status"`
+}
+
+// DisconnectDevice revokes a device's credentials without deleting it
+// (docs/06-auth.md §6).
+//
+// Both hashes are cleared, not just the session: clearing only
+// sessionTokenHash would let the device call POST /device/token with the
+// deviceSecret it still holds and be back online within seconds
+// (§6, "セッション切断が sessionToken だけでは成立しない理由"). The device
+// discovers this the next time it uploads, as a 401 it cannot refresh past
+// (§5) — nothing pushes the disconnection to it.
+//
+// The status in the response comes from the write's ALL_NEW return rather
+// than from a constant, so what the client renders is what was actually
+// stored.
+func (h *Handler) DisconnectDevice(ctx context.Context, req events.APIGatewayV2HTTPRequest) (httpx.Response, error) {
+	_, dev, err := h.loadOwnedDevice(ctx, req)
+	if err != nil {
+		return httpx.Response{}, err
+	}
+	updated, err := h.store.DisconnectDevice(ctx, dev.DeviceID)
+	if err != nil {
+		return httpx.Response{}, err
+	}
+	h.log(ctx, "webapi: device disconnected", "ownerId", updated.OwnerID, "deviceId", updated.DeviceID)
+	return httpx.Response{Body: DisconnectDeviceResponse{
+		DeviceID: updated.DeviceID,
+		Status:   updated.Status,
+	}}, nil
+}
+
+// updateDeviceRequest is PATCH /devices/{id}'s body (api.ts:
+// UpdateDeviceRequest).
+//
+// Both fields are pointers because PATCH means "change what I sent". With
+// plain values there is no way to tell `{"name":"x"}` from
+// `{"name":"x","interval":0}`, and the second would write interval = 0 —
+// silently stopping the device from ever uploading again.
+type updateDeviceRequest struct {
+	Name     *string `json:"name"`
+	Interval *int    `json:"interval"`
+}
+
+// UpdateDevice renames a device and/or changes its upload interval
+// (docs/05-backend.md §1.2). It returns the complete Device (api.ts:
+// UpdateDeviceResponse = Device) so the list row is replaced wholesale
+// rather than merged field by field.
+//
+// Ownership is proven before the body is even parsed: validating a
+// stranger's payload and answering "invalid interval" would confirm the
+// device exists to someone with no right to know it does.
+func (h *Handler) UpdateDevice(ctx context.Context, req events.APIGatewayV2HTTPRequest) (httpx.Response, error) {
+	_, dev, err := h.loadOwnedDevice(ctx, req)
+	if err != nil {
+		return httpx.Response{}, err
+	}
+
+	var body updateDeviceRequest
+	if err := httpx.DecodeJSON(req, &body); err != nil {
+		return httpx.Response{}, err
+	}
+	if body.Name == nil && body.Interval == nil {
+		return httpx.Response{}, apierr.New(apierr.CodeValidation, "変更する項目がありません")
+	}
+
+	in := store.UpdateDeviceProfileInput{DeviceID: dev.DeviceID}
+	if body.Name != nil {
+		name := strings.TrimSpace(*body.Name)
+		if name == "" {
+			return httpx.Response{}, apierr.New(apierr.CodeValidation, "端末名を入力してください")
+		}
+		in.Name = &name
+	}
+	if body.Interval != nil {
+		// Validated against the same list GET /app-config hands the
+		// client's <select>, so the offered choices and the accepted ones
+		// cannot drift. This value reaches the device through the upload
+		// response's nextConfig and becomes its real cadence: an
+		// unvalidated 0 stops a camera, an unvalidated 1 hammers the API.
+		if !isOfferedInterval(*body.Interval) {
+			return httpx.Response{}, apierr.New(apierr.CodeValidation, "送信間隔が不正です")
+		}
+		in.Interval = body.Interval
+	}
+
+	updated, err := h.store.UpdateDeviceProfile(ctx, in)
+	if err != nil {
+		return httpx.Response{}, err
+	}
+
+	now := h.clock.Now()
+	// A PATCH never touches pairing, so the session is re-resolved rather
+	// than assumed absent: a rename while the QR modal is open must not
+	// come back with activePairingSession null and blank the modal.
+	session, err := h.activeSessionFor(ctx, updated.OwnerID, updated.DeviceID, now)
+	if err != nil {
+		return httpx.Response{}, err
+	}
+	dto, err := h.mapper.Device(ctx, *updated, session, now)
+	if err != nil {
+		return httpx.Response{}, err
+	}
+	h.log(ctx, "webapi: device updated", "ownerId", updated.OwnerID, "deviceId", updated.DeviceID)
+	return httpx.Response{Body: dto}, nil
+}
+
+// DeleteDevice logically deletes a device (docs/06-auth.md §6): status
+// ARCHIVED, credentials cleared, and GSI1PK swapped into the ARCHIVED
+// partition so it leaves the owner's list and stops counting against the
+// device limit.
+//
+// The row itself survives, which is what keeps the immediate-revocation
+// guarantee honest: the authorizer denies on status, not on absence
+// (§4), so a deleted device is rejected on its very next request even
+// though its record is still there.
+//
+// 204 with no body. api-client.ts synthesizes {success:true} itself rather
+// than reading one from us.
+func (h *Handler) DeleteDevice(ctx context.Context, req events.APIGatewayV2HTTPRequest) (httpx.Response, error) {
+	_, dev, err := h.loadOwnedDevice(ctx, req)
+	if err != nil {
+		return httpx.Response{}, err
+	}
+	updated, err := h.store.ArchiveDevice(ctx, dev.DeviceID, h.clock.Now())
+	if err != nil {
+		return httpx.Response{}, err
+	}
+	h.log(ctx, "webapi: device archived", "ownerId", updated.OwnerID, "deviceId", updated.DeviceID)
+	return httpx.Response{StatusCode: http.StatusNoContent}, nil
+}
+
+// isOfferedInterval reports whether v is one of the intervals
+// GET /app-config advertises.
+func isOfferedInterval(v int) bool {
+	for _, offered := range api.IntervalOptions {
+		if v == offered {
+			return true
+		}
+	}
+	return false
+}
+
+// activeSessionFor resolves one device's currently-showable pairing session
+// through the owner's GSI1 partition — the same query and the same rule
+// ListDevices uses, so a device's activePairingSession cannot mean one
+// thing in the list and another in a single-device response.
+func (h *Handler) activeSessionFor(ctx context.Context, ownerID, deviceID string, now time.Time) (*api.PairingSession, error) {
+	rows, err := h.store.ListOwnerDevices(ctx, ownerID)
+	if err != nil {
+		return nil, err
+	}
+	return api.ActivePairingSession(latestSessionsByDevice(rows)[deviceID], now), nil
 }
 
 // loadOwnedDevice resolves {id} from the path and proves the caller owns it.
