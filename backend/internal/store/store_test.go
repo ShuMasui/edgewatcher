@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,8 +260,17 @@ func TestConsumePairing_TransactItemsShape(t *testing.T) {
 	if pairingUpdate.ConditionExpression == nil || *pairingUpdate.ConditionExpression != "#status = :pending AND expiresAt > :nowEpoch" {
 		t.Fatalf("unexpected PairingSession ConditionExpression: %v", pairingUpdate.ConditionExpression)
 	}
-	if pairingUpdate.UpdateExpression == nil || *pairingUpdate.UpdateExpression != "SET #status = :consumed, consumedAt = :nowIso REMOVE GSI2PK, GSI2SK" {
+	// GSI2PK/GSI2SK must NOT be removed here. Dropping them would make a
+	// consumed code indistinguishable from one GSI2 has not yet propagated
+	// (both become PAIRING_NOT_FOUND), and 404 is the one code the device
+	// retries — so a device whose pairing succeeded but whose response was
+	// lost would re-scan and be told 無効な QR
+	// (docs/engineering/dynamodb.md §4, docs/04-native.md §1.4).
+	if pairingUpdate.UpdateExpression == nil || *pairingUpdate.UpdateExpression != "SET #status = :consumed, consumedAt = :nowIso" {
 		t.Fatalf("unexpected PairingSession UpdateExpression: %v", pairingUpdate.UpdateExpression)
+	}
+	if strings.Contains(*pairingUpdate.UpdateExpression, "GSI2") {
+		t.Fatal("ConsumePairing must leave GSI2PK/GSI2SK in place so a replayed code classifies as PAIRING_CODE_CONSUMED rather than as an index miss")
 	}
 	if pairingUpdate.ExpressionAttributeNames["#status"] != "status" {
 		t.Fatalf("PairingSession Update must escape #status -> status, got %v", pairingUpdate.ExpressionAttributeNames)

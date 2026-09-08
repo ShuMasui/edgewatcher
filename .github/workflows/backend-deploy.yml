@@ -1,0 +1,136 @@
+# Backend CI/CD (docs/05-backend.md §4, docs/00-overview.md §8, OPS-03).
+#
+# Terraform manages the function shells and ignores their code
+# (infra/modules/lambda's lifecycle.ignore_changes on filename and
+# source_code_hash), so infrastructure is applied by hand and CODE ships
+# from here via update-function-code. That split is what keeps `terraform
+# plan` free of a code diff on every deploy — otherwise the plan a human is
+# supposed to read before touching prod is buried in noise it must ignore.
+name: backend-deploy
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-deploy.yml'
+  pull_request:
+    paths:
+      - 'backend/**'
+      - '.github/workflows/backend-deploy.yml'
+  # prod is deliberately manual (docs/00-overview.md §8): dev deploys on
+  # merge, prod is a decision someone makes.
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deploy target'
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+concurrency:
+  # Two deploys racing update-function-code would leave whichever finished
+  # last live, which need not be the newer commit.
+  group: backend-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  GO_VERSION: '1.26'
+  AWS_REGION: ap-northeast-1
+
+permissions:
+  contents: read
+
+jobs:
+  # verify runs on pull requests too, so a change is checked before it can
+  # reach develop — the branch that deploys.
+  verify:
+    runs-on: ubuntu-latest
+    services:
+      # internal/store's integration tests run against the real DynamoDB
+      # API rather than a stub. The condition expressions this codebase
+      # depends on (attribute_not_exists, TransactWriteItems cancellation
+      # reasons) are exactly what a hand-written stub gets wrong, so a
+      # green unit suite over a fake would prove very little about them.
+      dynamodb:
+        image: amazon/dynamodb-local:latest
+        ports: ['8000:8000']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache-dependency-path: backend/go.sum
+
+      - name: Lint (gofmt + vet)
+        working-directory: backend
+        run: make lint
+
+      - name: Unit tests
+        working-directory: backend
+        run: make test
+
+      - name: Integration tests (DynamoDB Local)
+        working-directory: backend
+        env:
+          DYNAMO_ENDPOINT: http://localhost:8000
+        run: make test-integration
+
+      - name: Build all four functions
+        working-directory: backend
+        run: make build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lambda-zips
+          path: backend/dist/*.zip
+          retention-days: 7
+          if-no-files-found: error
+
+  deploy:
+    needs: verify
+    # Never from a pull request: a fork's PR must not be able to publish
+    # code into an AWS account.
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    permissions:
+      contents: read
+      # OIDC: the workflow assumes a role rather than holding a long-lived
+      # access key. docs/05-backend.md §3.6 keeps secrets out of the
+      # runtime; the same reasoning applies to the pipeline.
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: lambda-zips
+          path: dist
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy the four functions
+        env:
+          ENV_NAME: ${{ github.event.inputs.environment || 'dev' }}
+        run: |
+          set -euo pipefail
+          # Names come from infra/modules/lambda: "${name_prefix}-${name}"
+          # with name_prefix = "edgewatcher-${env}".
+          for fn in authorizer web-api device-auth device-api; do
+            target="edgewatcher-${ENV_NAME}-${fn}"
+            echo "::group::${target}"
+            aws lambda update-function-code \
+              --function-name "${target}" \
+              --zip-file "fileb://dist/${fn}.zip" \
+              --publish \
+              --no-cli-pager
+            # update-function-code returns as soon as the update is accepted.
+            # Waiting means a failed deploy fails the job here, rather than
+            # surfacing later as an unexplained 500 from a half-updated
+            # function.
+            aws lambda wait function-updated --function-name "${target}"
+            echo "::endgroup::"
+          done

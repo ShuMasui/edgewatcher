@@ -462,10 +462,40 @@ func TestConsumePairing_Success(t *testing.T) {
 		t.Fatalf("expected deviceInfo to be set, got %+v", dev.DeviceInfo)
 	}
 
-	// GSI2 must no longer resolve this code — the REMOVE worked.
-	_, err = s.FindPairingByCode(ctx, "OKCODE")
-	if apiErr := apierr.AsError(err); apiErr.Code != apierr.CodePairingNotFound {
-		t.Fatalf("expected CodePairingNotFound (GSI2 no longer resolves a consumed code), got %v", err)
+	// GSI2 must STILL resolve this code. The tidy-up instinct is to drop
+	// the index entry on consumption, but then a replayed code and a code
+	// GSI2 has not yet propagated both surface as PAIRING_NOT_FOUND — and
+	// 404 is the one answer the device retries (docs/04-native.md §1.4),
+	// so a device whose pairing succeeded but whose response was lost
+	// would re-scan and end up reporting 無効な QR for a pairing that
+	// worked. docs/engineering/dynamodb.md §4 requires the distinction:
+	// only a request that reached the base table and failed its condition
+	// counts as an invalid QR. Reuse is blocked by the status condition
+	// (asserted below), not by the index.
+	replayed, err := s.FindPairingByCode(ctx, "OKCODE")
+	if err != nil {
+		t.Fatalf("GSI2 must still resolve a consumed code so a replay can be classified: %v", err)
+	}
+	if replayed.Status != PairingStatusConsumed {
+		t.Fatalf("resolved session status = %s, want CONSUMED", replayed.Status)
+	}
+
+	// And a replayed consume is refused with the code the device can act
+	// on, rather than the retryable 404.
+	replayErr := s.ConsumePairing(ctx, ConsumePairingInput{
+		DeviceID: "d-ok", PairingCode: "OKCODE", DeviceSecretHash: "second-hash",
+		Now: now.Add(2 * time.Second),
+	})
+	if apiErr := apierr.AsError(replayErr); apiErr.Code != apierr.CodePairingCodeConsumed {
+		t.Fatalf("replayed consume gave %v, want CodePairingCodeConsumed", replayErr)
+	}
+	// The first pairing's credential must survive the refused replay.
+	dev, err = s.GetDeviceForAuth(ctx, "d-ok")
+	if err != nil {
+		t.Fatalf("GetDeviceForAuth after replay: %v", err)
+	}
+	if dev.DeviceSecretHash != "secret-hash" {
+		t.Fatalf("deviceSecretHash = %q, want the original — a refused replay must not overwrite it", dev.DeviceSecretHash)
 	}
 
 	// The base-table row itself is still there, just CONSUMED.
@@ -483,8 +513,8 @@ func TestConsumePairing_Success(t *testing.T) {
 	if session.Status != PairingStatusConsumed {
 		t.Fatalf("expected CONSUMED, got %s", session.Status)
 	}
-	if _, present := out.Item["GSI2PK"]; present {
-		t.Fatal("GSI2PK must be removed from the consumed PairingSession row")
+	if _, present := out.Item["GSI2PK"]; !present {
+		t.Fatal("GSI2PK must remain on the consumed PairingSession row — see the FindPairingByCode assertion above")
 	}
 }
 

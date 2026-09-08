@@ -255,13 +255,27 @@ type ConsumePairingInput struct {
 //
 // One TransactWriteItems call, two Updates in the same partition:
 //
-//  1. PairingSession: PENDING -> CONSUMED, REMOVE GSI2PK/GSI2SK so the
-//     code becomes unresolvable through GSI2 the instant it's consumed
-//     (a replayed code can't even be looked up, let alone re-consumed).
+//  1. PairingSession: PENDING -> CONSUMED.
 //     Condition: status = PENDING AND expiresAt > now. Carries
 //     ReturnValuesOnConditionCheckFailure: ALL_OLD so a failure here can
 //     be classified into PAIRING_CODE_EXPIRED vs PAIRING_CODE_CONSUMED
 //     without a second round trip.
+//
+//     GSI2PK/GSI2SK are deliberately LEFT IN PLACE. Removing them on
+//     consumption is the obvious tidy-up — the index would hold only
+//     live sessions — but it destroys the distinction
+//     docs/engineering/dynamodb.md §4 requires: a consumed code would
+//     then be indistinguishable from a code GSI2 has not yet propagated,
+//     and both would surface as PAIRING_NOT_FOUND. That is the one code
+//     the device RETRIES (docs/04-native.md §1.4), so a device whose
+//     pairing succeeded but whose response was lost would re-scan, be
+//     told 404 three times, and report 無効な QR for a pairing that
+//     actually worked. §4 states the rule directly: only a request that
+//     reached the base table and failed its condition may be called an
+//     invalid QR. Leaving the index entry is what lets a replay reach it.
+//     Reuse is prevented by the status condition, not by the index, and
+//     the row is swept by its own 5-minute TTL regardless.
+//
 //  2. Device: status -> PAIRED, deviceSecretHash and deviceInfo set.
 //     Condition: attribute_exists(PK) AND status <> ARCHIVED — the second
 //     clause is an addition beyond docs/06-auth.md's condition (that
@@ -287,7 +301,7 @@ func (s *Store) ConsumePairing(ctx context.Context, in ConsumePairingInput) erro
 				Key: map[string]types.AttributeValue{
 					"PK": stringAV(key), "SK": stringAV(pairingSK(in.PairingCode)),
 				},
-				UpdateExpression:    strPtr("SET #status = :consumed, consumedAt = :nowIso REMOVE GSI2PK, GSI2SK"),
+				UpdateExpression:    strPtr("SET #status = :consumed, consumedAt = :nowIso"),
 				ConditionExpression: strPtr("#status = :pending AND expiresAt > :nowEpoch"),
 				ExpressionAttributeNames: map[string]string{
 					"#status": "status",

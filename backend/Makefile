@@ -39,8 +39,12 @@ test:
 #   docker run -d --name ew-dynamodb-local -p 8000:8000 amazon/dynamodb-local
 #   make test-integration
 #   docker rm -f ew-dynamodb-local
+# internal/e2e is included here, not in `test`: it drives all four Lambdas
+# against the real DynamoDB engine, which is the only place a disagreement
+# BETWEEN packages can show up (one package's fake always agrees with its
+# own assumptions).
 test-integration:
-	DYNAMO_ENDPOINT=$${DYNAMO_ENDPOINT:-http://localhost:8000} go test -race -tags=integration ./internal/store/...
+	DYNAMO_ENDPOINT=$${DYNAMO_ENDPOINT:-http://localhost:8000} go test -race -tags=integration ./internal/store/... ./internal/e2e/...
 
 lint: fmt vet
 
