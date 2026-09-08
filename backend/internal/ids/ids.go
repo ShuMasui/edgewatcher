@@ -110,3 +110,31 @@ func NewDeviceSecret() (string, error) {
 	}
 	return pairingCodeEncoding.EncodeToString(buf), nil
 }
+
+// sessionSecretBytes is the random half of a session token: 128 bits, per
+// docs/06-auth.md §3's "<deviceId>.<128bit ランダム>". It is half the width
+// of a deviceSecret deliberately — a session lives 12 hours and is rotated
+// on every exchange, so it has far less exposure to defend, and the token
+// travels on every single upload where a shorter value is cheaper.
+const sessionSecretBytes = 16
+
+// NewSessionToken returns a session token of the form "<deviceId>.<random>"
+// (docs/06-auth.md §3).
+//
+// The deviceId prefix is not decoration: it is what lets the Lambda
+// Authorizer resolve the device with a single GetItem on
+// DEVICE#<deviceId> and check existence, status, hash and expiry in one
+// read (§3, §4). A bare random token would require an index lookup on
+// every authorized request.
+//
+// The random half shares base32's alphabet with pairing codes and device
+// secrets, which keeps every credential in this system free of "." — the
+// separator the authorizer splits on — so a token can never be ambiguous
+// about where its deviceId ends.
+func NewSessionToken(deviceID string) (string, error) {
+	buf := make([]byte, sessionSecretBytes)
+	if _, err := rand.Read(buf); err != nil {
+		return "", fmt.Errorf("ids: generate session token: %w", err)
+	}
+	return deviceID + "." + pairingCodeEncoding.EncodeToString(buf), nil
+}

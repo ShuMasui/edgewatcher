@@ -11,6 +11,18 @@ import (
 // *apierr.Error is a pointer: a single shared instance would be safe only
 // as long as nothing along the way ever mutated it, which is a fragile
 // invariant to depend on across five downstream tasks.
+// badRequest builds the 400 every body-level parse failure returns. The
+// cause is wrapped rather than interpolated into the message: apierr.Body
+// serializes only Code and Message, so the detail stays in the log where
+// it is useful and out of the response where it would describe our parser
+// to a caller.
+func badRequest(msg string, cause error) *apierr.Error {
+	if cause == nil {
+		return apierr.New(apierr.CodeValidation, msg)
+	}
+	return apierr.Wrap(apierr.CodeValidation, msg, cause)
+}
+
 func unauthenticated() *apierr.Error {
 	return apierr.New(apierr.CodeUnauthorized, "認証されていません")
 }

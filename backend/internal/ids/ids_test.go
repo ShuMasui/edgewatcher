@@ -153,3 +153,47 @@ func TestNewPairingCodeIsRandomEachCall(t *testing.T) {
 		t.Errorf("two pairing codes should not collide: %q", a)
 	}
 }
+
+// TestNewSessionToken_Shape pins the format the Lambda Authorizer parses:
+// the deviceId, one ".", then the random half. The authorizer splits on the
+// FIRST "." and treats everything before it as the deviceId, so the random
+// half must not introduce another one — base32 guarantees that, and this
+// test would catch a switch to an encoding (base64url's "-_" is fine,
+// standard base64's "+/=" is not) that changed the alphabet.
+func TestNewSessionToken_Shape(t *testing.T) {
+	got, err := NewSessionToken("01J0DEVICE")
+	if err != nil {
+		t.Fatalf("NewSessionToken: %v", err)
+	}
+	deviceID, random, found := strings.Cut(got, ".")
+	if !found {
+		t.Fatalf("token %q has no separator", got)
+	}
+	if deviceID != "01J0DEVICE" {
+		t.Errorf("deviceId = %q, want %q", deviceID, "01J0DEVICE")
+	}
+	if strings.Contains(random, ".") {
+		t.Errorf("random half %q contains a second separator", random)
+	}
+	// 16 bytes of base32 without padding is ceil(128/5) = 26 characters.
+	if len(random) != 26 {
+		t.Errorf("random half = %q (%d chars), want 26 (128 bits of base32)", random, len(random))
+	}
+}
+
+// TestNewSessionToken_Unique guards the one property that makes rotation
+// meaningful: two calls must not produce the same token, or a "rotated"
+// session would still accept the value it was supposed to invalidate.
+func TestNewSessionToken_Unique(t *testing.T) {
+	seen := make(map[string]bool, 100)
+	for i := 0; i < 100; i++ {
+		tok, err := NewSessionToken("01J0DEVICE")
+		if err != nil {
+			t.Fatalf("NewSessionToken: %v", err)
+		}
+		if seen[tok] {
+			t.Fatalf("duplicate token %q after %d draws", tok, i)
+		}
+		seen[tok] = true
+	}
+}
