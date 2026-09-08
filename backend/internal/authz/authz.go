@@ -154,9 +154,18 @@ func (a *Authorizer) Authorize(ctx context.Context, req events.APIGatewayV2Custo
 // with a ULID deviceId) can never equal or start with that literal
 // string.
 //
+// The raw header value is trimmed of surrounding whitespace before the
+// prefix is stripped. API Gateway normally delivers header values already
+// trimmed, so this is not covering a real wire condition; it exists so
+// stray whitespace denies here, at parse time, with an accurate
+// missing_or_malformed_header reason — rather than surviving into a
+// device lookup that succeeds and then failing the hash compare, which
+// would misdirect diagnosis toward the hash-encoding contract instead of
+// the header itself.
+//
 // It reports ok=false for a nil header map, a missing key, an empty
-// token (after stripping any "Bearer " prefix), or a token with no
-// "<deviceId>." prefix to key the GetItem on.
+// token (after trimming and stripping any "Bearer " prefix), or a token
+// with no "<deviceId>." prefix to key the GetItem on.
 func extractToken(headers map[string]string) (token, deviceID string, ok bool) {
 	if headers == nil {
 		return "", "", false
@@ -165,7 +174,7 @@ func extractToken(headers map[string]string) (token, deviceID string, ok bool) {
 	if !present {
 		return "", "", false
 	}
-	token = strings.TrimPrefix(raw, bearerPrefix)
+	token = strings.TrimPrefix(strings.TrimSpace(raw), bearerPrefix)
 	if token == "" {
 		return "", "", false
 	}

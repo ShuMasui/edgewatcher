@@ -411,3 +411,39 @@ func TestExtractToken(t *testing.T) {
 		})
 	}
 }
+
+// TestAuthorize_WrongAuthScheme pins the one behaviour the Bearer-tolerance
+// change (review round 1, C1) moved without breaking: a scheme other than
+// the documented bare token or the tolerated "Bearer " prefix must still
+// deny. The denial no longer happens in extractToken — "Basic dev-1.abc"
+// parses cleanly into deviceId "Basic dev-1" — it happens one layer down
+// at the device lookup, which finds nothing under that garbage id. Nothing
+// asserted that after the inversion, so a future widening of the prefix
+// tolerance (say, a case-insensitive or scheme-agnostic strip) could start
+// authorizing these without failing a test.
+//
+// The store here holds a genuinely valid dev-1 session, so a pass would
+// mean the wrong-scheme header successfully reached a real device — not
+// merely that some unrelated lookup missed.
+func TestAuthorize_WrongAuthScheme(t *testing.T) {
+	token := "dev-1.somerandomvalue"
+	dev := pairedDevice("dev-1", "owner-1", token, fixedNowUnix+3600)
+	a := newAuthorizer(map[string]*store.Device{"dev-1": dev}, nil)
+
+	cases := map[string]string{
+		"Basic scheme":          "Basic " + token,
+		"lowercase bearer":      "bearer " + token,
+		"doubled Bearer prefix": "Bearer Bearer " + token,
+	}
+	for name, header := range cases {
+		t.Run(name, func(t *testing.T) {
+			resp, err := a.Authorize(context.Background(), requestWithAuth(header))
+			if err != nil {
+				t.Fatalf("Authorize returned error: %v", err)
+			}
+			if resp.IsAuthorized {
+				t.Fatalf("expected IsAuthorized false for header %q", header)
+			}
+		})
+	}
+}
