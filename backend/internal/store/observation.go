@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"time"
 
 	"github.com/aws/aws-sdk-go-v2/feature/dynamodb/attributevalue"
 	"github.com/aws/aws-sdk-go-v2/service/dynamodb"
@@ -120,4 +121,52 @@ func (s *Store) PutObservation(ctx context.Context, obs Observation) error {
 		return wrapInternal("PutObservation", err)
 	}
 	return nil
+}
+
+// NewObservationInput is the domain-level description of one captured
+// image, as device-api receives it.
+type NewObservationInput struct {
+	DeviceID      string
+	ObservationID string
+	CapturedAt    time.Time
+	ImageKey      string
+	ThumbnailKey  string
+	Lat           *float64
+	Lng           *float64
+
+	// RetentionDays is RETENTION_DAYS (dev 1 / prod 7). It sets the item's
+	// TTL so DynamoDB's sweep and the image bucket's lifecycle rule expire
+	// the metadata and the bytes together
+	// (docs/engineering/dynamodb.md §7).
+	RetentionDays int
+}
+
+// NewObservation builds the base-table item for one observation.
+//
+// It exists so that device-api — the only writer of observations — never
+// constructs a "DEVICE#"/"OBS#" key itself. Key construction lives in
+// keys.go and is unexported precisely so there is one place it can be
+// wrong; a handler assembling PK by string concatenation would be a second
+// place, and the two would diverge silently the first time a prefix
+// changed.
+//
+// ExpiresAt is derived from capturedAt rather than from the receipt time.
+// A device backfilling a week of offline photos (docs/04-native.md §3.5)
+// must not be able to extend their retention past the window the bucket's
+// lifecycle rule will delete their bytes in, which would leave records
+// pointing at objects that no longer exist.
+func NewObservation(in NewObservationInput) Observation {
+	return Observation{
+		PK:            deviceKey(in.DeviceID),
+		SK:            observationSK(in.ObservationID),
+		EntityType:    "Observation",
+		ObservationID: in.ObservationID,
+		DeviceID:      in.DeviceID,
+		CapturedAt:    formatISO(in.CapturedAt),
+		ImageKey:      in.ImageKey,
+		ThumbnailKey:  in.ThumbnailKey,
+		Lat:           in.Lat,
+		Lng:           in.Lng,
+		ExpiresAt:     in.CapturedAt.AddDate(0, 0, in.RetentionDays).Unix(),
+	}
 }

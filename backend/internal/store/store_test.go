@@ -545,3 +545,59 @@ func TestClassifyPairingConditionFailure_EmptyItemIsExpired(t *testing.T) {
 		t.Fatalf("expected CodePairingCodeExpired for an empty ALL_OLD item, got %s", apiErr.Code)
 	}
 }
+
+// TestNewObservation_Keys pins the item's identity against
+// docs/engineering/dynamodb.md §3. The SK is the ULID's sort position, so a
+// wrong prefix here would not error — it would silently make the day-range
+// query in QueryObservationsByDay return nothing.
+func TestNewObservation_Keys(t *testing.T) {
+	capturedAt := time.Date(2026, 9, 8, 2, 4, 5, 0, time.UTC)
+	obs := NewObservation(NewObservationInput{
+		DeviceID: "dev-1", ObservationID: "01J0OBS", CapturedAt: capturedAt,
+		ImageKey:      "observations/dev-1/2026-09-08/01J0OBS.jpg",
+		ThumbnailKey:  "observations/dev-1/2026-09-08/01J0OBS_thumb.jpg",
+		RetentionDays: 1,
+	})
+
+	if obs.PK != "DEVICE#dev-1" {
+		t.Errorf("PK = %q, want %q", obs.PK, "DEVICE#dev-1")
+	}
+	if obs.SK != "OBS#01J0OBS" {
+		t.Errorf("SK = %q, want %q", obs.SK, "OBS#01J0OBS")
+	}
+	if obs.EntityType != "Observation" {
+		t.Errorf("entityType = %q, want %q", obs.EntityType, "Observation")
+	}
+	if obs.CapturedAt != "2026-09-08T02:04:05Z" {
+		t.Errorf("capturedAt = %q, want the UTC RFC3339 form", obs.CapturedAt)
+	}
+}
+
+// TestNewObservation_TTLFollowsCapturedAt. Deriving expiresAt from the
+// receipt time instead would let a device backfilling a week of offline
+// photos (docs/04-native.md §3.5) give each of them a fresh full retention
+// window — outliving the S3 lifecycle rule that deletes their bytes on the
+// capture date's schedule, and leaving records pointing at objects that are
+// gone (docs/engineering/dynamodb.md §7).
+func TestNewObservation_TTLFollowsCapturedAt(t *testing.T) {
+	capturedAt := time.Date(2026, 9, 1, 2, 4, 5, 0, time.UTC)
+	obs := NewObservation(NewObservationInput{
+		DeviceID: "dev-1", ObservationID: "01J0OBS", CapturedAt: capturedAt, RetentionDays: 7,
+	})
+	if want := capturedAt.AddDate(0, 0, 7).Unix(); obs.ExpiresAt != want {
+		t.Errorf("expiresAt = %d, want capturedAt+7d = %d", obs.ExpiresAt, want)
+	}
+}
+
+// TestNewObservation_OmitsAbsentCoordinates: lat/lng are pointers because a
+// device without a location fix must store no attribute at all. Writing 0/0
+// would place every such photo in the Gulf of Guinea.
+func TestNewObservation_OmitsAbsentCoordinates(t *testing.T) {
+	obs := NewObservation(NewObservationInput{
+		DeviceID: "dev-1", ObservationID: "01J0OBS",
+		CapturedAt: time.Date(2026, 9, 8, 0, 0, 0, 0, time.UTC), RetentionDays: 1,
+	})
+	if obs.Lat != nil || obs.Lng != nil {
+		t.Errorf("lat/lng = %v/%v, want both nil", obs.Lat, obs.Lng)
+	}
+}
