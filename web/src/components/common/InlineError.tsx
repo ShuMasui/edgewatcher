@@ -13,14 +13,14 @@ interface InlineErrorProps {
 export const InlineError: React.FC<InlineErrorProps> = ({
   title = '読み込めませんでした',
   message = '通信に失敗しました。しばらく待ってからもう一度お試しください。',
-  mark = '!',
+  mark = 'ERROR',
   onRetry,
   retryLabel = '再試行',
   actionButton,
 }) => {
   return (
     <div className="inline-error" data-testid="inline-error">
-      <div className="mark">{mark}</div>
+      <div className="mark-code">{mark}</div>
       <h4>{title}</h4>
       <p>{message}</p>
       {actionButton ? (

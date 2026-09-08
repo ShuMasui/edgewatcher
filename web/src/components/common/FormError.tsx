@@ -7,7 +7,7 @@ interface FormErrorProps {
 export const FormError: React.FC<FormErrorProps> = ({ children }) => {
   return (
     <div className="form-error" role="alert" data-testid="form-error">
-      <span>⚠</span>
+      <span className="label">エラー</span>
       <div>{children}</div>
     </div>
   );

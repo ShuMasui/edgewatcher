@@ -69,7 +69,7 @@ export const RenameModal: React.FC<RenameModalProps> = ({
             disabled={isLoading || !name.trim() || name.trim() === initialName}
             data-testid="rename-submit-btn"
           >
-            {isLoading ? '保存中...' : '再試行'}
+            {isLoading ? '保存中...' : error ? '再試行' : '保存'}
           </Button>
         </div>
       </form>

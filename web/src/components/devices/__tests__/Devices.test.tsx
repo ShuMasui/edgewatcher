@@ -93,7 +93,7 @@ describe('DevicesPage', () => {
     );
 
     expect(await screen.findByTestId('device-limit-banner')).toBeInTheDocument();
-    expect(screen.getByText(/端末の上限\(3台\)に達しています/)).toBeInTheDocument();
+    expect(screen.getByText(/登録できる端末は 3 台までです/)).toBeInTheDocument();
     expect(screen.getByTestId('add-device-btn')).toBeDisabled();
   });
 

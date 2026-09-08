@@ -89,9 +89,7 @@ export const DevicesPage: React.FC = () => {
         {isAtLimit && <DeviceLimitBanner limit={deviceLimit} />}
 
         {isLoading && devices.length === 0 ? (
-          <div style={{ padding: 40, textAlign: 'center', color: 'var(--muted)' }}>
-            読み込み中...
-          </div>
+          <div className="loading">読み込み中</div>
         ) : isInitialError ? (
           <InlineError
             title="読み込めませんでした"

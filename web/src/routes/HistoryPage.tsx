@@ -53,13 +53,13 @@ export const HistoryPage: React.FC = () => {
       <Shell>
         <div className="topbar">
           <Button size="sm" onClick={() => navigate('/devices')}>
-            ← 戻る
+            戻る
           </Button>
           <h3>端末</h3>
         </div>
         <div className="content">
           <InlineError
-            mark="?"
+            mark="NOT FOUND"
             title="この端末は見つかりません"
             message="削除されたか、アクセスする権限がありません。"
             actionButton={
@@ -77,7 +77,7 @@ export const HistoryPage: React.FC = () => {
     <Shell>
       <div className="topbar" data-testid="history-topbar">
         <Button size="sm" onClick={() => navigate(-1)} data-testid="back-button">
-          ← 戻る
+          戻る
         </Button>
         <h3>{device?.name || '端末'}</h3>
         <DateNavigator
@@ -91,9 +91,7 @@ export const HistoryPage: React.FC = () => {
 
       <div className="content" data-testid="history-content">
         {isDeviceLoading || isObsLoading ? (
-          <div style={{ padding: 40, textAlign: 'center', color: 'var(--muted)' }}>
-            読み込み中...
-          </div>
+          <div className="loading">読み込み中</div>
         ) : isError ? (
           <InlineError
             title="履歴を読み込めませんでした"

@@ -42,7 +42,9 @@ export const KebabMenu: React.FC<KebabMenuProps> = ({ onRename, onDelete }) => {
         aria-expanded={isOpen}
         data-testid="kebab-button"
       >
-        ⋮
+        <span />
+        <span />
+        <span />
       </button>
 
       {isOpen && (

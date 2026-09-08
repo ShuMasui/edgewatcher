@@ -31,25 +31,27 @@ export const ThumbnailStrip: React.FC<ThumbnailStripProps> = ({
   const visibleObservations = observations.slice(start, end);
 
   return (
-    <div className="strip" data-testid="thumbnail-strip">
-      {visibleObservations.map((obs, idx) => {
-        const actualIndex = start + idx;
-        const isSelected = actualIndex === currentIndex;
+    <div className="strip-frame">
+      <div className="strip" data-testid="thumbnail-strip">
+        {visibleObservations.map((obs, idx) => {
+          const actualIndex = start + idx;
+          const isSelected = actualIndex === currentIndex;
 
-        return (
-          <div
-            key={obs.observationId}
-            className={`cell ${isSelected ? 'sel' : ''}`}
-            onClick={() => onSelectIndex(actualIndex)}
-            role="button"
-            tabIndex={0}
-            aria-label={`撮影時刻 ${obs.capturedAt}`}
-            data-testid={`thumb-${actualIndex}`}
-          >
-            <img src={obs.thumbnailUrl} alt="Thumbnail" loading="lazy" />
-          </div>
-        );
-      })}
+          return (
+            <button
+              key={obs.observationId}
+              type="button"
+              className={`cell ${isSelected ? 'sel' : ''}`}
+              onClick={() => onSelectIndex(actualIndex)}
+              aria-label={`撮影時刻 ${obs.capturedAt}`}
+              aria-current={isSelected}
+              data-testid={`thumb-${actualIndex}`}
+            >
+              <img src={obs.thumbnailUrl} alt="" loading="lazy" />
+            </button>
+          );
+        })}
+      </div>
     </div>
   );
 };

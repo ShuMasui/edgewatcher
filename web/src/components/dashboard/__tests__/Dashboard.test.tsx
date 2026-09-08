@@ -64,7 +64,7 @@ describe('DashboardPage', () => {
     expect(screen.getByText('物置')).toBeInTheDocument();
     expect(screen.getByText('接続中')).toBeInTheDocument();
     expect(screen.getByText('ペアリング待ち')).toBeInTheDocument();
-    expect(screen.getByText('QR コードの読み取り待ち')).toBeInTheDocument();
+    expect(screen.getByText('QR コードの読み取りを待っています')).toBeInTheDocument();
     expect(screen.getByTestId('device-count')).toHaveTextContent('2 台');
   });
 

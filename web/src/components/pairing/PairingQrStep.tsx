@@ -86,9 +86,7 @@ export const PairingQrStep: React.FC<PairingQrStepProps> = ({
         {qrDataUrl ? (
           <img src={qrDataUrl} alt="Pairing QR Code" className="qr" data-testid="pairing-qr-image" />
         ) : (
-          <div style={{ width: 170, height: 170, display: 'grid', placeItems: 'center', color: '#888' }}>
-            QR 生成中...
-          </div>
+          <div className="qr qr-void">QR を生成しています</div>
         )}
       </div>
 

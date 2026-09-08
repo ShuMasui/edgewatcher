@@ -70,26 +70,36 @@ export const Scrubber: React.FC<ScrubberProps> = ({
           aria-label={isPlaying ? '一時停止' : '再生'}
           data-testid="play-pause-btn"
         >
-          {isPlaying ? '❚❚' : '▶'}
+          {isPlaying ? '停止' : '再生'}
         </Button>
 
-        <div
-          className="track-container"
-          ref={trackRef}
-          onPointerDown={handlePointerDown}
-          data-testid="scrubber-track"
-        >
-          <div className="track">
-            <div className="fill" style={{ width: `${percentage}%` }} />
-            <div
-              className="knob"
-              style={{ left: `${percentage}%` }}
-              role="slider"
-              aria-valuenow={currentIndex}
-              aria-valuemin={0}
-              aria-valuemax={Math.max(0, totalCount - 1)}
-              data-testid="scrubber-knob"
-            />
+        <div className="track-column">
+          <div
+            className="track-container"
+            ref={trackRef}
+            onPointerDown={handlePointerDown}
+            data-testid="scrubber-track"
+          >
+            <div className="track">
+              <div className="fill" style={{ width: `${percentage}%` }} />
+              <div
+                className="knob"
+                style={{ left: `${percentage}%` }}
+                role="slider"
+                aria-valuenow={currentIndex}
+                aria-valuemin={0}
+                aria-valuemax={Math.max(0, totalCount - 1)}
+                data-testid="scrubber-knob"
+              />
+            </div>
+          </div>
+
+          <div className="ticks">
+            <span>0:00</span>
+            <span>6:00</span>
+            <span>12:00</span>
+            <span>18:00</span>
+            <span>24:00</span>
           </div>
         </div>
 
@@ -99,16 +109,8 @@ export const Scrubber: React.FC<ScrubberProps> = ({
           disabled={disabled || currentIndex === totalCount - 1}
           data-testid="jump-latest-btn"
         >
-          <span className="num">最新へ</span>
+          最新へ
         </button>
-      </div>
-
-      <div className="ticks">
-        <span>0:00</span>
-        <span>6:00</span>
-        <span>12:00</span>
-        <span>18:00</span>
-        <span>今</span>
       </div>
     </div>
   );

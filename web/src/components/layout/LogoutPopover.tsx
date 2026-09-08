@@ -48,7 +48,7 @@ export const LogoutPopover: React.FC<LogoutPopoverProps> = ({ isOpen, onClose })
         }}
         data-testid="logout-button"
       >
-        <span>⇥</span> ログアウト
+        ログアウト
       </button>
     </div>
   );

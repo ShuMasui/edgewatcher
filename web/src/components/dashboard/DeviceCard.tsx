@@ -19,11 +19,19 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({ device }) => {
 
   const renderVisual = () => {
     if (status === 'pending') {
-      return <div className="placeholder">QR コードの読み取り待ち</div>;
+      return (
+        <div className="placeholder">
+          <span>QR コードの読み取りを待っています</span>
+        </div>
+      );
     }
 
     if (status === 'disconnected') {
-      return <div className="placeholder">切断済み。再ペアリングが必要です</div>;
+      return (
+        <div className="placeholder">
+          <span>切断済み。再ペアリングすると再開します</span>
+        </div>
+      );
     }
 
     if (device.latestThumbnailUrl) {
@@ -39,12 +47,16 @@ export const DeviceCard: React.FC<DeviceCardProps> = ({ device }) => {
       );
     }
 
-    return <div className="placeholder">画像を受信していません</div>;
+    return (
+      <div className="placeholder">
+        <span>まだ画像が届いていません</span>
+      </div>
+    );
   };
 
   return (
     <div
-      className="card"
+      className={`card ${status === 'stale' ? 'is-down' : ''}`}
       onClick={handleClick}
       role="button"
       tabIndex={0}

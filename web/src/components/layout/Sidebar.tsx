@@ -15,14 +15,15 @@ export const Sidebar: React.FC = () => {
 
   return (
     <aside className="sidebar" data-testid="sidebar">
-      <NavLink to="/" className="logo" aria-label="EdgeWatcher Home" />
+      <div className="brand">
+        <NavLink to="/" className="mark" aria-label="EdgeWatcher ホーム" />
+      </div>
 
       <NavLink
         to="/"
         className={`nav ${isDashboardActive ? 'active' : ''}`}
         data-testid="nav-dashboard"
       >
-        <span className="ico">▦</span>
         最新画像
       </NavLink>
 
@@ -31,7 +32,6 @@ export const Sidebar: React.FC = () => {
         className={`nav ${isDevicesActive ? 'active' : ''}`}
         data-testid="nav-devices"
       >
-        <span className="ico">☰</span>
         端末一覧
       </NavLink>
 
@@ -44,15 +44,7 @@ export const Sidebar: React.FC = () => {
         data-testid="avatar-button"
       >
         <div className="avatar" title={user?.email || 'pentyan0303@gmail.com'}>
-          {user?.picture ? (
-            <img
-              src={user.picture}
-              alt="Avatar"
-              style={{ width: '100%', height: '100%', borderRadius: '50%' }}
-            />
-          ) : (
-            avatarInitial
-          )}
+          {user?.picture ? <img src={user.picture} alt="" /> : avatarInitial}
         </div>
       </button>
 

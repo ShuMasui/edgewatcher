@@ -22,20 +22,7 @@ export const PairingExpiredStep: React.FC<PairingExpiredStepProps> = ({
       </p>
 
       <div className="qr-wrapper">
-        <div
-          className="qr expired"
-          style={{
-            background: '#bbb',
-            width: 170,
-            height: 170,
-            borderRadius: 6,
-            display: 'grid',
-            placeItems: 'center',
-            color: '#444',
-            fontSize: 12,
-          }}
-          data-testid="expired-qr-placeholder"
-        >
+        <div className="qr qr-void" data-testid="expired-qr-placeholder">
           期限切れ
         </div>
       </div>

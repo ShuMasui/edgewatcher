@@ -12,8 +12,9 @@ export const PairingDoneStep: React.FC<PairingDoneStepProps> = ({
 }) => {
   return (
     <div data-testid="pairing-done-step">
-      <div className="success-mark" data-testid="pairing-success-check">
-        ✓
+      <div className="paired-mark" data-testid="pairing-success-check">
+        <span className="dot ok" />
+        接続中
       </div>
       <h4>「{deviceName}」が接続しました</h4>
       <p>
