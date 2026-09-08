@@ -1,0 +1,1264 @@
+/* ==========================================================================
+   EdgeWatcher — 定点観測のコンタクトシート
+   基調色 Wheat の上に、インクで刷った観測記録。
+   色は状態を表さない。状態は「形」で表す(■ 接続中 / □ 応答なし)。
+   indigo が意味するのは「いま・ここ」だけ(フォーカス、再生位置、選択中のコマ)。
+   ========================================================================== */
+
+:root {
+  --wheat: #f5deb3;
+  --wheat-deep: #e3cb9b;
+  --paper: #fcf6e8;
+  --ink: #211d17;
+  --ink-soft: #6f6553;
+  --indigo: #2c4a78;
+  --alarm: #8a2b18;
+
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: "Hiragino Sans", "Yu Gothic UI", "Noto Sans JP", system-ui, -apple-system, sans-serif;
+
+  --radius: 2px;
+  --rule: 1.5px solid var(--ink);
+  --hairline: 1px solid var(--wheat-deep);
+
+  font-synthesis-weight: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  background: var(--wheat);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 13px;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+#root {
+  min-height: 100vh;
+  display: flex;
+}
+
+:focus-visible {
+  outline: 2px solid var(--indigo);
+  outline-offset: 2px;
+}
+
+/* mono は「機械が書いた値」に使う。時刻・台数・間隔・識別子・ラベル。 */
+.mono,
+.num,
+.count {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 小さな大文字ラベル。見出しではなく「欄の名前」であることを示す */
+.label {
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* ---------- 銘 ---------- */
+/* 絞りを見立てた印。インクの角板に Wheat の丸を抜く */
+.mark {
+  width: 26px;
+  height: 26px;
+  background: var(--ink);
+  display: block;
+  flex-shrink: 0;
+  position: relative;
+}
+
+.mark::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--wheat);
+}
+
+.mark.lg {
+  width: 40px;
+  height: 40px;
+}
+
+.mark.lg::after {
+  width: 14px;
+  height: 14px;
+}
+
+/* ---------- シェル ---------- */
+.app-layout {
+  display: flex;
+  width: 100%;
+  min-height: 100vh;
+  position: relative;
+}
+
+.sidebar {
+  width: 92px;
+  flex-shrink: 0;
+  border-right: var(--rule);
+  background: var(--wheat-deep);
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 20px 0;
+  gap: 2px;
+  position: sticky;
+  top: 0;
+  height: 100vh;
+  z-index: 20;
+}
+
+.brand {
+  display: flex;
+  justify-content: center;
+  margin-bottom: 24px;
+}
+
+.nav {
+  padding: 11px 8px 11px 14px;
+  color: #574e40;
+  font-size: 12px;
+  line-height: 1.35;
+  text-decoration: none;
+  border-left: 3px solid transparent;
+  transition: color 0.12s ease, border-color 0.12s ease;
+  user-select: none;
+}
+
+.nav:hover {
+  color: var(--ink);
+}
+
+.nav.active {
+  color: var(--ink);
+  font-weight: 600;
+  border-left-color: var(--ink);
+}
+
+.spacer {
+  flex: 1;
+}
+
+.avatar-btn {
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0 auto;
+  cursor: pointer;
+  border-radius: 50%;
+}
+
+.avatar {
+  width: 34px;
+  height: 34px;
+  border-radius: 50%;
+  overflow: hidden;
+  background: var(--paper);
+  border: var(--rule);
+  display: grid;
+  place-items: center;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--ink);
+  transition: border-color 0.12s ease;
+}
+
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.avatar-btn:hover .avatar {
+  border-color: var(--indigo);
+}
+
+.main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+}
+
+/* 太い罫は1本だけ。それが「見出しとその中身」の境界であることを一目で示す */
+.topbar {
+  padding: 20px 28px;
+  border-bottom: 2px solid var(--ink);
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-height: 68px;
+}
+
+.topbar h3 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+}
+
+.topbar .count {
+  font-size: 12px;
+  color: var(--ink-soft);
+}
+
+.content {
+  padding: 28px;
+  flex: 1;
+}
+
+/* ---------- ボタン ---------- */
+/* primary はインクベタ塗り。indigo は「いまの位置」専用なので押しつけない */
+.btn {
+  font: inherit;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 7px 15px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  border: var(--rule);
+  background: transparent;
+  color: var(--ink);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  line-height: 1.45;
+  text-decoration: none;
+  transition: background-color 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.btn:hover:not([disabled]) {
+  background: var(--ink);
+  color: var(--wheat);
+}
+
+.btn.primary {
+  background: var(--ink);
+  color: var(--wheat);
+}
+
+.btn.primary:hover:not([disabled]) {
+  background: var(--indigo);
+  border-color: var(--indigo);
+}
+
+.btn.danger {
+  color: var(--alarm);
+  border-color: var(--alarm);
+}
+
+.btn.danger:hover:not([disabled]) {
+  background: var(--alarm);
+  color: var(--paper);
+}
+
+.btn.danger-fill {
+  background: var(--alarm);
+  border-color: var(--alarm);
+  color: var(--paper);
+}
+
+.btn.sm {
+  padding: 4px 11px;
+  font-size: 12px;
+}
+
+.btn[disabled] {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+
+.push {
+  margin-left: auto;
+}
+
+/* ---------- 状態 ---------- */
+/* 色ではなく形。塗りつぶし=生きている、白抜き=届いていない */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  color: var(--ink);
+  white-space: nowrap;
+}
+
+.dot {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--ink);
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.dot.ok {
+  background: var(--ink);
+}
+
+/* 応答なしは「気づいてほしい異常」。切断済みは「自分でそうした状態」。
+   前者だけが警告色を持ち、後者は静かに沈む */
+.badge:has(.dot.warn) {
+  color: var(--alarm);
+}
+
+.dot.warn {
+  border-color: var(--alarm);
+}
+
+.badge:has(.dot.disconnected) {
+  color: var(--ink-soft);
+}
+
+.dot.disconnected {
+  border-color: var(--ink-soft);
+}
+
+/* ペアリング待ちだけが動く。実際に入力を待っている状態なので明滅は嘘ではない */
+.dot.pending {
+  background: var(--indigo);
+  border-color: var(--indigo);
+  animation: blink 1.4s steps(1, end) infinite;
+}
+
+@keyframes blink {
+  0%, 55% { opacity: 1; }
+  56%, 100% { opacity: 0.15; }
+}
+
+/* ---------- コンタクトシート(ダッシュボード) ---------- */
+.grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 22px;
+}
+
+/* 台紙に貼った1コマ。写真の下に手書きの注記があるあの形式 */
+.card {
+  background: var(--paper);
+  border: var(--rule);
+  padding: 8px 8px 0;
+  cursor: pointer;
+  display: flex;
+  flex-direction: column;
+  transition: border-color 0.12s ease;
+}
+
+.card:hover,
+.card:focus-visible {
+  border-color: var(--indigo);
+}
+
+.shot {
+  aspect-ratio: 4/3;
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  background: var(--wheat-deep);
+  border: 1px solid var(--ink);
+}
+
+.shot img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+/* 応答が途絶えた端末の画像は「過去のもの」。彩度を落として現在と区別する */
+.card.is-down .shot img {
+  filter: grayscale(1);
+  opacity: 0.62;
+}
+
+.shot .stamp {
+  position: absolute;
+  right: 0;
+  bottom: 0;
+  background: var(--ink);
+  padding: 3px 7px;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--wheat);
+  font-variant-numeric: tabular-nums;
+}
+
+/* 画像が1枚も無い状態。斜めの目地で「ここには何も焼かれていない」ことを示す */
+.placeholder {
+  aspect-ratio: 4/3;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--ink);
+  background: repeating-linear-gradient(
+    45deg,
+    var(--wheat-deep) 0 6px,
+    var(--paper) 6px 12px
+  );
+  color: var(--ink-soft);
+  font-size: 12px;
+  text-align: center;
+  padding: 20px;
+}
+
+.placeholder span {
+  background: var(--paper);
+  box-shadow: 0 0 0 5px var(--paper);
+}
+
+.card-body {
+  padding: 9px 1px 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.card-body .name {
+  font-weight: 600;
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.card-body .when {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.card.is-down .card-body .when {
+  color: var(--alarm);
+}
+
+/* 途絶えた端末は「最後に届いた時刻」だけが赤く残る。画面上で唯一の警告色 */
+.card.is-down .shot .stamp {
+  background: var(--alarm);
+  color: var(--paper);
+}
+
+/* ---------- 表 ---------- */
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+thead th {
+  border-bottom: var(--rule);
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+  padding: 0 14px 8px;
+  text-align: left;
+}
+
+tbody td {
+  padding: 13px 14px;
+  border-bottom: var(--hairline);
+  font-size: 13px;
+  vertical-align: middle;
+}
+
+tbody tr:hover {
+  background: var(--paper);
+}
+
+tbody td .name {
+  font-weight: 600;
+}
+
+.num {
+  color: var(--ink-soft);
+  font-size: 12px;
+}
+
+select {
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink);
+  border: var(--rule);
+  border-radius: var(--radius);
+  padding: 4px 26px 4px 9px;
+  cursor: pointer;
+  appearance: none;
+  -webkit-appearance: none;
+  background-color: var(--paper);
+  background-image: linear-gradient(45deg, transparent 50%, var(--ink) 50%),
+    linear-gradient(135deg, var(--ink) 50%, transparent 50%);
+  background-position: calc(100% - 13px) calc(50% + 1px), calc(100% - 9px) calc(50% + 1px);
+  background-size: 4px 4px, 4px 4px;
+  background-repeat: no-repeat;
+}
+
+.row-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  justify-content: flex-end;
+  position: relative;
+}
+
+/* ⋮ の字ではなく、実際に点を3つ打つ */
+.kebab {
+  border: 1.5px solid transparent;
+  background: none;
+  cursor: pointer;
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius);
+  padding: 0;
+  display: grid;
+  place-items: center;
+  gap: 3px;
+  grid-auto-rows: 3px;
+}
+
+.kebab span {
+  width: 3px;
+  height: 3px;
+  background: var(--ink-soft);
+  display: block;
+}
+
+.kebab:hover {
+  border-color: var(--ink);
+}
+
+.kebab:hover span {
+  background: var(--ink);
+}
+
+/* ---------- 空状態 ---------- */
+.empty {
+  text-align: center;
+  padding: 96px 20px;
+  color: var(--ink-soft);
+  max-width: 460px;
+  margin: 0 auto;
+}
+
+.empty h4 {
+  color: var(--ink);
+  margin: 0 0 10px;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+.empty p {
+  margin: 0 0 24px;
+  line-height: 1.85;
+  font-size: 13px;
+}
+
+/* ---------- ログイン ---------- */
+.login {
+  flex: 1;
+  display: grid;
+  place-items: center;
+  min-height: 100vh;
+  padding: 24px;
+}
+
+.login-box {
+  width: 316px;
+}
+
+.login-box .mark {
+  margin-bottom: 22px;
+}
+
+.login-box .wordmark {
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 19px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  margin: 0 0 4px;
+}
+
+.login-box p {
+  color: var(--ink-soft);
+  margin: 0 0 32px;
+  line-height: 1.85;
+  font-size: 13px;
+}
+
+.login-box .label {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.google {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  border: var(--rule);
+  border-radius: var(--radius);
+  padding: 11px;
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.12s ease;
+}
+
+.google:hover {
+  background: var(--wheat-deep);
+}
+
+.google svg {
+  width: 17px;
+  height: 17px;
+  flex-shrink: 0;
+}
+
+/* ---------- 履歴 ---------- */
+.viewer {
+  max-width: 760px;
+  margin: 0 auto;
+}
+
+.viewer .big {
+  aspect-ratio: 4/3;
+  position: relative;
+  overflow: hidden;
+  border: var(--rule);
+  background: var(--wheat-deep);
+}
+
+.viewer .big img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.viewer .big .stamp {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  background: var(--ink);
+  color: var(--wheat);
+  padding: 5px 11px;
+  font-family: var(--mono);
+  font-size: 13px;
+  font-variant-numeric: tabular-nums;
+}
+
+.transport {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  margin: 18px 0 0;
+}
+
+.transport .btn {
+  margin-top: 1px;
+}
+
+/* 目盛りはトラックと同じ幅の列に入れる。両端が必ず 0:00 / 24:00 に揃う */
+.track-column {
+  flex: 1;
+  min-width: 0;
+}
+
+.track-container {
+  width: 100%;
+  position: relative;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+}
+
+.track {
+  width: 100%;
+  height: 3px;
+  background: var(--wheat-deep);
+  position: relative;
+}
+
+.track .fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  background: var(--indigo);
+}
+
+.track .knob {
+  position: absolute;
+  top: 50%;
+  width: 3px;
+  height: 18px;
+  background: var(--indigo);
+  transform: translate(-50%, -50%);
+  cursor: grab;
+}
+
+.track .knob:active {
+  cursor: grabbing;
+}
+
+.ticks {
+  display: flex;
+  justify-content: space-between;
+  font-family: var(--mono);
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--ink-soft);
+  margin-top: 2px;
+}
+
+/* ---------- 署名:フィルムのコマ列 ---------- */
+/* インクの帯にパーフォレーションを開け、コマを隙間なく並べる。
+   定点観測はまさにこれ — 同じ枠を、等間隔で、ずっと撮り続ける */
+.strip-frame {
+  margin: 22px auto 0;
+  background: var(--ink);
+  padding: 13px 6px;
+  position: relative;
+  width: fit-content;
+  max-width: 100%;
+}
+
+.strip-frame::before,
+.strip-frame::after {
+  content: "";
+  position: absolute;
+  left: 5px;
+  right: 5px;
+  height: 13px;
+  background-image: radial-gradient(
+    circle at 8px 50%,
+    var(--wheat) 0 2.4px,
+    transparent 3px
+  );
+  background-size: 16px 13px;
+  background-repeat: repeat-x;
+  pointer-events: none;
+}
+
+.strip-frame::before {
+  top: 0;
+}
+
+.strip-frame::after {
+  bottom: 0;
+}
+
+.strip {
+  display: flex;
+  gap: 1px;
+  justify-content: center;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.strip::-webkit-scrollbar {
+  display: none;
+}
+
+.strip .cell {
+  width: 78px;
+  aspect-ratio: 4/3;
+  cursor: pointer;
+  overflow: hidden;
+  background: var(--ink-soft);
+  flex-shrink: 0;
+  position: relative;
+  border: 0;
+  padding: 0;
+}
+
+.strip .cell img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+  opacity: 0.72;
+  transition: opacity 0.12s ease;
+}
+
+.strip .cell:hover img {
+  opacity: 1;
+}
+
+/* 選択中のコマだけが indigo で押さえられる */
+.strip .cell.sel img {
+  opacity: 1;
+}
+
+.strip .cell.sel::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border: 3px solid var(--indigo);
+}
+
+.empty-day {
+  display: grid;
+  place-items: center;
+  height: 78px;
+  margin-top: 18px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  border: 1px dashed var(--ink-soft);
+}
+
+.retention-note {
+  margin-top: 16px;
+  text-align: center;
+  color: var(--ink-soft);
+  font-size: 11px;
+  font-family: var(--mono);
+  letter-spacing: 0.03em;
+}
+
+.datenav {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+  margin-left: auto;
+}
+
+.datenav .day {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  min-width: 96px;
+  text-align: center;
+}
+
+.datenav .arrow {
+  border: var(--rule);
+  background: transparent;
+  color: var(--ink);
+  width: 26px;
+  height: 26px;
+  border-radius: var(--radius);
+  cursor: pointer;
+  font: inherit;
+  font-size: 14px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  transition: background-color 0.12s ease, color 0.12s ease;
+}
+
+.datenav .arrow:hover:not([disabled]) {
+  background: var(--ink);
+  color: var(--wheat);
+}
+
+.datenav .arrow[disabled] {
+  opacity: 0.3;
+  cursor: not-allowed;
+}
+
+/* ---------- モーダル ---------- */
+.overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(33, 29, 23, 0.42);
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  z-index: 100;
+}
+
+/* 影は付けない。背後を沈めるオーバーレイが既にその仕事をしている */
+.modal {
+  background: var(--paper);
+  border: var(--rule);
+  width: 396px;
+  max-width: 100%;
+  padding: 26px;
+  text-align: center;
+  max-height: calc(100vh - 48px);
+  overflow-y: auto;
+}
+
+.modal.left {
+  text-align: left;
+}
+
+.modal h4 {
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.6;
+}
+
+.modal p {
+  color: var(--ink-soft);
+  font-size: 13px;
+  line-height: 1.85;
+  margin: 0 0 20px;
+}
+
+.field {
+  text-align: left;
+  margin-bottom: 20px;
+}
+
+.field label {
+  display: block;
+  margin-bottom: 7px;
+  font-family: var(--mono);
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+.field input {
+  width: 100%;
+  font: inherit;
+  font-size: 13px;
+  padding: 9px 11px;
+  border-radius: var(--radius);
+  background: var(--wheat);
+  border: var(--rule);
+  color: var(--ink);
+}
+
+.field input::placeholder {
+  color: var(--ink-soft);
+  opacity: 0.7;
+}
+
+/* QR は読み取り精度のため白地のまま。枠だけインクで締める */
+.qr-wrapper {
+  width: 192px;
+  height: 192px;
+  margin: 0 auto 14px;
+  padding: 11px;
+  background: #fff;
+  border: var(--rule);
+  display: grid;
+  place-items: center;
+}
+
+.qr {
+  width: 168px;
+  height: 168px;
+  display: block;
+}
+
+.qr.qr-void {
+  display: grid;
+  place-items: center;
+  background: repeating-linear-gradient(
+    45deg,
+    #e6e6e6 0 6px,
+    #f4f4f4 6px 12px
+  );
+  color: #555;
+  font-size: 12px;
+  text-align: center;
+  padding: 0 16px;
+}
+
+.countdown {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+  color: var(--indigo);
+  margin-bottom: 20px;
+}
+
+.actions {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+}
+
+/* 接続完了。チェックマークではなく、一覧と同じ「■」で伝える */
+.paired-mark {
+  display: inline-flex;
+  align-items: center;
+  gap: 9px;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink);
+  border-bottom: var(--rule);
+  padding-bottom: 7px;
+  margin-bottom: 16px;
+}
+
+.paired-mark .dot {
+  width: 9px;
+  height: 9px;
+}
+
+/* ---------- メニュー・ポップオーバー ---------- */
+.menu,
+.popover {
+  position: absolute;
+  background: var(--paper);
+  border: var(--rule);
+  box-shadow: 0 6px 18px rgba(33, 29, 23, 0.16);
+  padding: 4px;
+  z-index: 50;
+}
+
+.menu {
+  right: 0;
+  top: 32px;
+  width: 180px;
+}
+
+.popover {
+  position: fixed;
+  left: 100px;
+  bottom: 18px;
+  width: 244px;
+  z-index: 40;
+}
+
+.menu button,
+.popover button {
+  display: block;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  color: var(--ink);
+  font: inherit;
+  font-size: 13px;
+  padding: 8px 10px;
+  border-radius: var(--radius);
+  cursor: pointer;
+}
+
+.menu button:hover,
+.popover button:hover {
+  background: var(--wheat-deep);
+}
+
+.menu button.danger {
+  color: var(--alarm);
+}
+
+.popover .who {
+  padding: 9px 10px 11px;
+  border-bottom: var(--hairline);
+  margin-bottom: 4px;
+}
+
+.popover .who .mail {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+  word-break: break-all;
+  line-height: 1.55;
+}
+
+/* ---------- 注意・エラー ---------- */
+/* 記号で驚かせない。欄の名前を mono で置き、太い縦罫で本文を括る */
+.banner,
+.form-error {
+  padding: 12px 15px;
+  border-left: 3px solid var(--ink);
+  background: var(--paper);
+  font-size: 13px;
+  line-height: 1.8;
+  text-align: left;
+}
+
+.banner {
+  margin-bottom: 22px;
+}
+
+.form-error {
+  border-left-color: var(--alarm);
+  margin-bottom: 18px;
+  font-size: 12.5px;
+}
+
+.banner .label,
+.form-error .label {
+  display: block;
+  margin-bottom: 3px;
+}
+
+.form-error .label {
+  color: var(--alarm);
+}
+
+.banner strong {
+  font-weight: 600;
+}
+
+.stale {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--alarm);
+  font-variant-numeric: tabular-nums;
+}
+
+.stale .dot {
+  border-color: var(--alarm);
+}
+
+.inline-error {
+  text-align: center;
+  padding: 88px 20px;
+  color: var(--ink-soft);
+  max-width: 440px;
+  margin: 0 auto;
+}
+
+.inline-error .mark-code {
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  color: var(--ink-soft);
+  border-bottom: var(--rule);
+  padding-bottom: 7px;
+  margin-bottom: 18px;
+  display: inline-block;
+}
+
+.inline-error h4 {
+  color: var(--ink);
+  margin: 0 0 10px;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.inline-error p {
+  margin: 0 0 24px;
+  line-height: 1.85;
+  font-size: 13px;
+}
+
+.row-error {
+  color: var(--alarm);
+  font-size: 11px;
+  margin-top: 5px;
+  line-height: 1.5;
+}
+
+.loading {
+  padding: 88px 20px;
+  text-align: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+/* ---------- 狭い画面 ---------- */
+@media (max-width: 720px) {
+  .app-layout {
+    flex-direction: column;
+  }
+
+  .sidebar {
+    width: 100%;
+    height: auto;
+    flex-direction: row;
+    align-items: center;
+    gap: 4px;
+    padding: 10px 14px;
+    border-right: none;
+    border-bottom: var(--rule);
+  }
+
+  .brand {
+    margin-bottom: 0;
+    margin-right: 8px;
+  }
+
+  .nav {
+    padding: 6px 12px;
+    border-left: none;
+    border-bottom: 3px solid transparent;
+  }
+
+  .nav.active {
+    border-left-color: transparent;
+    border-bottom-color: var(--ink);
+  }
+
+  .avatar-btn {
+    margin: 0;
+  }
+
+  .popover {
+    left: auto;
+    right: 14px;
+    top: 66px;
+    bottom: auto;
+  }
+
+  .topbar {
+    padding: 16px 18px;
+    flex-wrap: wrap;
+    gap: 10px;
+  }
+
+  .content {
+    padding: 18px;
+  }
+
+  .ticks {
+    padding: 0 56px 0 48px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+
+  .dot.pending {
+    opacity: 1;
+  }
+}
