@@ -20,5 +20,5 @@ output "hosted_ui_domain" {
 
 output "google_idp_enabled" {
   description = "Google IdP が構成されているか。false の間は誰もログインできない。"
-  value       = var.google_client_id != null
+  value       = var.google_idp_enabled
 }

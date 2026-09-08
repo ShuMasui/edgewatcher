@@ -28,6 +28,12 @@ output "table_name" {
   value       = module.data.table_name
 }
 
+# Web のビルドに渡す値(web/.env)。Hosted UI へのリダイレクトに使う。
+output "cognito_client_id" {
+  description = "Cognito App Client ID。Web の VITE_COGNITO_CLIENT_ID に入れる。"
+  value       = module.cognito_web.user_pool_client_id
+}
+
 output "cognito_hosted_ui" {
   description = "Hosted UI のドメイン。"
   value       = module.cognito_web.hosted_ui_domain

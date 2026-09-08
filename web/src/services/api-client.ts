@@ -110,7 +110,22 @@ class ApiClient {
     if (env.useMock) {
       return mockServer.getLatestPairingSession(deviceId);
     }
-    return this.request<GetLatestPairingSessionResponse>(`/devices/${deviceId}/pairing-sessions/latest`);
+    // 一度も QR を発行していない端末に対してサーバは 404 を返す
+    // (空の 200 を返すと、ポーリング側が「無いこと」を本文から読み取る
+    // 羽目になるため)。呼び出し側の型は null なので、ここで戻す。
+    // 404 以外のエラーはそのまま投げる — ポーリングが静かに null を
+    // 返し続けると、サーバ障害が「まだスキャンされていない」と
+    // 見分けられなくなる。
+    try {
+      return await this.request<GetLatestPairingSessionResponse>(
+        `/devices/${deviceId}/pairing-sessions/latest`
+      );
+    } catch (err) {
+      if (err instanceof ApiError && err.statusCode === 404) {
+        return null;
+      }
+      throw err;
+    }
   }
 
   // POST /devices/{id}/disconnect
@@ -156,11 +171,22 @@ class ApiClient {
   }
 
   // GET /observations/{id}/image
-  async getObservationImage(observationId: string): Promise<GetObservationImageResponse> {
+  // GET /observations/{id}/image?deviceId=
+  //
+  // deviceId は必須。観測は PK = DEVICE#<deviceId> でキーされているため
+  // observationId だけでは一意に引けず、そもそも所有者チェックの対象が
+  // 決まらない(05-backend.md §1.5、G11)。省くとサーバは 400 を返す。
+  async getObservationImage(
+    observationId: string,
+    deviceId: string
+  ): Promise<GetObservationImageResponse> {
     if (env.useMock) {
-      return mockServer.getObservationImage(observationId);
+      return mockServer.getObservationImage(observationId, deviceId);
     }
-    return this.request<GetObservationImageResponse>(`/observations/${observationId}/image`);
+    const query = new URLSearchParams({ deviceId });
+    return this.request<GetObservationImageResponse>(
+      `/observations/${observationId}/image?${query}`
+    );
   }
 }
 

@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Routes, Route } from 'react-router-dom';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { AuthProvider } from '@/hooks/use-auth';
@@ -80,6 +80,46 @@ describe('HistoryPage', () => {
     expect(screen.getByTestId('main-history-image')).toBeInTheDocument();
     expect(screen.getByTestId('scrubber')).toBeInTheDocument();
     expect(screen.getByTestId('thumbnail-strip')).toBeInTheDocument();
+  });
+
+  // 実 API の一覧は imageUrl を返さない(05-backend.md §1.5: 1日分すべてに
+  // 本画像の署名を付けると、開きもしない画像の有効な認可をブラウザに
+  // 大量に渡すことになる)。モックは一覧に imageUrl を載せるため、上の
+  // テストだけでは実 API に繋いだ瞬間に「サムネイルを引き伸ばして表示し、
+  // 本画像は一度も取りに行かない」状態になったことに気づけない。
+  it('fetches the full-size image on demand when the list omits imageUrl', async () => {
+    const listWithoutFullImages: Observation[] = mockObservations.map(
+      ({ imageUrl: _dropped, ...rest }) => rest
+    );
+    vi.spyOn(apiClient, 'getObservations').mockResolvedValue(listWithoutFullImages);
+    const getImage = vi.spyOn(apiClient, 'getObservationImage').mockResolvedValue({
+      observationId: 'obs-2',
+      imageUrl: 'data:image/svg+xml;utf8,<svg id="full2"></svg>',
+      expiresAt: Math.floor(Date.now() / 1000) + 900,
+    });
+
+    const queryClient = createTestQueryClient();
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/devices/dev-001/history']}>
+          <AuthProvider>
+            <Routes>
+              <Route path="/devices/:deviceId/history" element={<HistoryPage />} />
+            </Routes>
+          </AuthProvider>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    const image = await screen.findByTestId('main-history-image');
+    await waitFor(() => {
+      expect(image).toHaveAttribute('src', 'data:image/svg+xml;utf8,<svg id="full2"></svg>');
+    });
+
+    // deviceId を伴って呼ばれること。省くとサーバは 400 を返し、観測が
+    // どの端末のものかを検証する経路そのものが成立しない(G11)。
+    expect(getImage).toHaveBeenCalledWith('obs-2', 'dev-001');
   });
 
   it('disables previous date arrow and shows retention note when retentionDays is 1 (today only)', async () => {

@@ -362,7 +362,13 @@ class MockServer {
     return observations;
   }
 
-  async getObservationImage(observationId: string): Promise<{ observationId: string; imageUrl: string; expiresAt: number }> {
+  // deviceId は実 API では必須(所有者チェックの対象を決める)。モックでは
+  // 使わないが、シグネチャを揃えておかないと呼び出し側が実 API 用の引数を
+  // 落としても型検査を通ってしまう。
+  async getObservationImage(
+    observationId: string,
+    _deviceId: string
+  ): Promise<{ observationId: string; imageUrl: string; expiresAt: number }> {
     const hour = parseInt(observationId.slice(-2), 10) % 24 || 14;
     const svg = generateMockImageSvg(observationId.charCodeAt(observationId.length - 1), hour);
     return {
