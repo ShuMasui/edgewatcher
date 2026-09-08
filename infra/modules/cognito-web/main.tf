@@ -53,11 +53,30 @@ resource "aws_cognito_user_pool_domain" "web" {
 # ---------------------------------------------------------------------------
 # Google IdP
 #
-# client_id / client_secret が未取得の間は作らない(01-openquestion.md AUTH-07)。
-# 取得したら値を入れて apply するだけで有効になる。
+# google_idp_enabled が false の間は作らない(01-openquestion.md AUTH-07)。
+# client_secret は Secrets Manager から apply 時に注入されるため、
+# 「シークレットの入れ物を作る apply」と「IdP を作る apply」が分かれる。
+# その 1回目を必ず成功させるためのフラグである(envs/dev/variables.tf)。
+#
+# precondition は、値の注入を忘れたまま有効化する事故を止めるためにある。
+# 空文字のシークレットで IdP を作ること自体は AWS 側で成功してしまい、
+# 「ログインボタンは出るが必ず失敗する」という、apply のログにも
+# CloudWatch にも現れない壊れ方になる。
 # ---------------------------------------------------------------------------
 resource "aws_cognito_identity_provider" "google" {
-  count = var.google_client_id == null ? 0 : 1
+  count = var.google_idp_enabled ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition     = var.google_client_id != null && var.google_client_id != ""
+      error_message = "google_idp_enabled = true には google_client_id が必要です。tfvars に設定してください(AUTH-07)。"
+    }
+
+    precondition {
+      condition     = var.google_client_secret != null && var.google_client_secret != ""
+      error_message = "google_idp_enabled = true には google_client_secret が必要です。Secrets Manager に値を投入し、TF_VAR_google_client_secret として渡してください(infra/README.md)。"
+    }
+  }
 
   user_pool_id  = aws_cognito_user_pool.web.id
   provider_name = "Google"
@@ -92,7 +111,7 @@ resource "aws_cognito_user_pool_client" "web" {
   # Google が未設定の間は COGNITO のみ。設定後は Google が加わる。
   supported_identity_providers = compact([
     "COGNITO",
-    var.google_client_id == null ? "" : "Google",
+    var.google_idp_enabled ? "Google" : "",
   ])
 
   callback_urls = var.callback_urls

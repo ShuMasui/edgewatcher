@@ -102,8 +102,11 @@ module "cognito_web" {
   name_prefix = local.name_prefix
   account_id  = data.aws_caller_identity.current.account_id
 
-  # 未取得の間は null。Google IdP は作られず、誰もログインできない状態になる
-  # (01-openquestion.md AUTH-07)。
+  # 2段階 apply(infra/README.md Phase 2)。google_idp_enabled が false の
+  # 間は Google IdP が作られず、誰もログインできない状態になる
+  # (01-openquestion.md AUTH-07)。client_secret は tfvars ではなく
+  # Secrets Manager から TF_VAR で注入される(secrets.tf)。
+  google_idp_enabled   = var.google_idp_enabled
   google_client_id     = var.google_client_id
   google_client_secret = var.google_client_secret
 

@@ -107,9 +107,13 @@ jobs:
           name: lambda-zips
           path: dist
 
+      # ロール名は infra/shared が決めている(edgewatcher-ci-deploy-<env>)。
+      # そのロールは Lambda のコード更新・Web アセットの同期・CloudFront の
+      # 無効化しか持たず、インフラには触れない(infra/shared/main.tf)。
+      # アカウント ID は秘密ではないのでリポジトリ変数に置く。
       - uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/edgewatcher-ci-deploy-${{ github.event.inputs.environment || 'dev' }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Deploy the four functions

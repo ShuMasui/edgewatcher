@@ -53,10 +53,34 @@ variable "google_client_id" {
 }
 
 variable "google_client_secret" {
-  description = "Google OAuth クライアントシークレット。"
+  description = <<-EOT
+    Google OAuth クライアントシークレット。
+
+    **tfvars には書かないこと。** 値は Secrets Manager の
+    `edgewatcher-<env>-google-oauth-client-secret` に置き、apply 時に
+    TF_VAR_google_client_secret として注入する(secrets.tf、infra/README.md)。
+  EOT
   type        = string
   default     = null
   sensitive   = true
+}
+
+variable "google_idp_enabled" {
+  description = <<-EOT
+    Cognito に Google IdP を作るか(AUTH-07)。
+
+    **2段階 apply のためのスイッチ。** 1回目は false のまま apply して
+    Secrets Manager の入れ物を作り、値を投入してから true にして 2回目を
+    apply する。シークレットが存在しない状態でも 1回目の apply が必ず成功
+    するように、依存を暗黙(client_id が null かどうか)ではなく明示にしている。
+
+    true にするには client_id と client_secret の両方が必要で、
+    片方だけだと apply が precondition で止まる — 値の注入を忘れたまま
+    有効化すると、空のシークレットを持つ IdP が出来上がり、
+    「ログインボタンはあるが必ず失敗する」という気づきにくい壊れ方をするため。
+  EOT
+  type        = bool
+  default     = false
 }
 
 variable "upload_placeholder" {

@@ -18,9 +18,12 @@ infra/
 | 変数 | `null` のとき | 参照 |
 | --- | --- | --- |
 | `root_domain` | Route53・ACM・カスタムドメインを作らない。`*.cloudfront.net` と `execute-api` の既定 URL で動作する | OPS-01 |
-| `google_client_id` | Google IdP を作らない。User Pool と Hosted UI だけが立つ(この間は誰もログインできない) | AUTH-07 |
+| `google_idp_enabled` | Google IdP を作らない。User Pool と Hosted UI だけが立つ(この間は誰もログインできない) | AUTH-07 |
 
 **確定したら値を埋めて apply するだけでよい。**コードの書き換えは不要。
+
+Google の client secret だけは値の置き場所が違う。tfvars にも TF_VAR の直書きにもせず、
+Secrets Manager に置いて apply 時に注入する(下の「Google IdP を有効にする」)。
 
 ---
 
@@ -146,6 +149,80 @@ Cognito User Pool のようなステートフルなリソースが**置換(destr
 
 ---
 
+## Google IdP を有効にする (AUTH-07)
+
+Google の client secret は **Terraform が値を管理しない**。`envs/dev/secrets.tf` が
+作るのは Secrets Manager の**入れ物だけ**で、`aws_secretsmanager_secret_version` は
+あえて置いていない。値を Terraform に持たせると、tfvars か TF_VAR か state の
+いずれかに平文で現れることになり、ASM に置いた意味がなくなるためである。
+
+そのため有効化は **2段階の apply** になる。1回目の apply はシークレットが
+まだ存在しない状態で走るので、`google_idp_enabled` を明示のフラグにして
+「値が揃っているか」と「有効化したいか」を分けてある。
+
+### 1. 入れ物を作る
+
+`terraform.tfvars` は `google_idp_enabled = false`(既定)のまま apply する。
+`edgewatcher-dev-google-oauth-client-secret` が空のまま作られる。
+
+### 2. 値を投入する(人間が一度だけ)
+
+Google Cloud Console で OAuth クライアントを作り、シークレットを流し込む。
+**この操作だけは AWS の資格情報を持つ人間が行う。**
+
+```sh
+aws secretsmanager put-secret-value \
+  --secret-id edgewatcher-dev-google-oauth-client-secret \
+  --secret-string '<Google が発行した client secret>'
+```
+
+ローテーションも同じコマンドで、以後 apply し直すだけで反映される。
+
+### 3. 有効化する
+
+`terraform.tfvars` に client ID(こちらは秘密ではない)を書き、フラグを立てる。
+
+```hcl
+google_client_id   = "xxxxx.apps.googleusercontent.com"
+google_idp_enabled = true
+```
+
+apply の方法は2つある。
+
+**GitHub Actions から**(手元に AWS の資格情報がなくてもよい)
+
+`main` ブランチで `infra-apply` ワークフローを `workflow_dispatch` する。
+ワークフローが Secrets Manager から値を読み、`TF_VAR_google_client_secret` として
+Terraform に渡す。`plan` で差分を確認してから `apply` を選ぶ。
+リポジトリ変数 `AWS_ACCOUNT_ID` が必要(ARN の組み立てに使うだけで、秘密ではない)。
+
+`edgewatcher-ci-apply-<env>` ロールの信頼ポリシーは sub を `refs/heads/main` に
+限っているため、他のブランチから dispatch しても AssumeRole の段階で拒否される。
+
+**手元から**
+
+```sh
+export TF_VAR_google_client_secret=$(aws secretsmanager get-secret-value \
+  --secret-id edgewatcher-dev-google-oauth-client-secret \
+  --query SecretString --output text)
+terraform -chdir=infra/envs/dev apply
+```
+
+値を入れ忘れたまま `google_idp_enabled = true` にした場合は、`cognito-web` の
+precondition が apply を止める。空のシークレットでも IdP の作成自体は AWS 側で
+成功してしまい、「ログインボタンは出るが必ず失敗する」という、apply のログにも
+CloudWatch にも現れない壊れ方になるため。
+
+### state に残ることについて
+
+Cognito の IdP リソースが client secret を属性として持つため、**値は tfstate に入る**。
+これは Terraform で Cognito を管理する以上避けられない。tfstate バケットは
+バージョニング + SSE + パブリックアクセス全面ブロックで、読めるのは
+`edgewatcher-ci-*` ロールと開発者の IAM ユーザーだけである(Phase 1)。
+ASM に置く意味は「値がリポジトリと開発者の手元に存在しないこと」にある。
+
+---
+
 ## Phase 4 — 疎通確認
 
 ```sh
@@ -184,7 +261,8 @@ terraform plan                  # 差分確認(apply の前に必ず)
 - リソース名は `edgewatcher-<env>-<name>`。S3 はアカウント ID をサフィックスに付ける
 - 共通タグは provider の `default_tags` で付ける
 - **`terraform.tfvars` にシークレットを置かない。** Google の client secret は
-  `TF_VAR_google_client_secret` 環境変数で渡す(`.gitignore` で `*.auto.tfvars` も除外済み)
+  Secrets Manager に置き、apply 時に `TF_VAR_google_client_secret` として注入する
+  (上の「Google IdP を有効にする」。`.gitignore` で `*.auto.tfvars` も除外済み)
 
 ### モジュール単体の検証について
 
