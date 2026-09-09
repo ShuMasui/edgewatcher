@@ -25,7 +25,7 @@ terraform {
 }
 
 provider "aws" {
-  region = var.region
+  region  = var.region
   profile = var.profile
 
   default_tags {
@@ -65,16 +65,58 @@ resource "aws_iam_openid_connect_provider" "github" {
   url             = "https://token.actions.githubusercontent.com"
   client_id_list  = ["sts.amazonaws.com"]
   thumbprint_list = []
+
+  # AWS は作成時にサムプリントを自動で1つ入れる。こちらは空を宣言して
+  # いるので、放っておくと毎回の plan に「サムプリントを消す」差分が出続け、
+  # apply すると AWS がまた入れる、を繰り返す。
+  #
+  # 値そのものはもう使われていない(AWS は 2023 年以降、GitHub のような
+  # 既知の IdP を自前の信頼ストアで検証する)。管理を AWS に委ねて差分を
+  # 黙らせるのが正しい。**plan を人間が読む前提の運用なので、中身の無い
+  # 差分を残しておくのは、読むべき差分を埋もれさせるという実害がある。**
+  lifecycle {
+    ignore_changes = [thumbprint_list]
+  }
 }
 
 locals {
-  repo_subject_prefix = "repo:${var.github_owner}/${var.github_repo}"
+  # sub のプレフィックスは2形式ありうる。
+  #
+  #   従来 : repo:<owner>/<repo>
+  #   現行 : repo:<owner>@<owner_id>/<repo>@<repo_id>
+  #
+  # **GitHub は既定を後者へ移しており、このリポジトリには後者が来る。**
+  # これは推測ではなく実測で、確認方法は2つある。
+  #
+  #   gh api repos/<owner>/<repo>/actions/oidc/customization/sub
+  #     -> {"use_default":true,
+  #         "sub_claim_prefix":"repo:ShuMasui@246949782/edgewatcher@1340466250"}
+  #
+  #   aws cloudtrail lookup-events \
+  #     --lookup-attributes AttributeKey=EventName,AttributeValue=AssumeRoleWithWebIdentity \
+  #     --max-results 1 --query 'Events[0].Username'
+  #     -> repo:ShuMasui@246949782/edgewatcher@1340466250:environment:dev
+  #
+  # **ID の付いた形を消すと CI 全体が AssumeRole の段階で落ちる。**
+  # 一度消して実際にそうなったので、消す前に上のどちらかで確認すること。
+  #
+  # 両方を許しているのは、GitHub 側がどちらを送っても壊れないようにするため。
+  # "repo:ShuMasui*/edgewatcher*" のようにワイルドカードでまとめる手も
+  # あるが、それだと ShuMasuiFoo/edgewatcher-bar のような別人のリポジトリ
+  # まで一致してしまう。ID は名前と違って再利用されないので、ID 入りの形の
+  # ほうが本来は厳しい条件になる。
+  repo_subject_prefixes = [
+    "repo:${var.github_owner}/${var.github_repo}",
+    "repo:${var.github_owner}@${var.github_owner_id}/${var.github_repo}@${var.github_repo_id}",
+  ]
 
   # plan は PR から走るため branch / pull_request の両方を許す。
-  plan_subjects = [
-    "${local.repo_subject_prefix}:pull_request",
-    "${local.repo_subject_prefix}:ref:refs/heads/*",
-  ]
+  plan_subjects = flatten([
+    for prefix in local.repo_subject_prefixes : [
+      "${prefix}:pull_request",
+      "${prefix}:ref:refs/heads/*",
+    ]
+  ])
 }
 
 # ---------------------------------------------------------------------------
@@ -88,10 +130,11 @@ locals {
 # 宣言しているため、ここで ref 形を期待すると AssumeRoleWithWebIdentity が
 # AccessDenied になる(実際になった)。
 #
-# ブランチの制限は sub とは別の ref クレームで担保する。GitHub の
-# Environment 側の「デプロイ可能ブランチ」でも同じことはできるが、それだと
-# 強制する場所が AWS の外に出てしまい、この state を読んでも何が許されて
-# いるのか分からなくなる。
+# ブランチで縛りたい場合は sub とは別の ref クレームを使う。ただし
+# **ref を IAM の条件キーとして使えることをまだ実測できていない。**
+# 現在どのロールも refs を空にしてあり、条件は生成されない。もともと
+# refs/heads/* で全ブランチを許していたので、実効的な制限は失われていない。
+# 足すときは1つずつ、AssumeRole が通る状態から1変数だけ変えて確かめること。
 # ---------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "github_assume" {
@@ -155,16 +198,16 @@ locals {
       # refs をブランチ全体に開けてあるのは暫定。ワークフローが main に
       # 乗ったら ["refs/heads/main"] に絞る。1行で戻せる。
       for env in local.envs : "edgewatcher-ci-apply-${env}" => {
-        subjects = ["${local.repo_subject_prefix}:environment:${env}"]
-        refs     = ["refs/heads/*"]
+        subjects = [for prefix in local.repo_subject_prefixes : "${prefix}:environment:${env}"]
+        refs     = []
         managed  = ["arn:aws:iam::aws:policy/AdministratorAccess"]
         inline   = null
       }
     },
     {
       for env in local.envs : "edgewatcher-ci-deploy-${env}" => {
-        subjects = ["${local.repo_subject_prefix}:environment:${env}"]
-        refs     = ["refs/heads/*"]
+        subjects = [for prefix in local.repo_subject_prefixes : "${prefix}:environment:${env}"]
+        refs     = []
         managed  = []
         inline   = data.aws_iam_policy_document.deploy[env].json
       }
@@ -201,10 +244,20 @@ data "aws_iam_policy_document" "tfstate_read" {
 data "aws_iam_policy_document" "deploy" {
   for_each = local.envs
 
+  # GetFunctionConfiguration は `aws lambda wait function-updated` が内部で
+  # 呼ぶ。更新の完了を待たずにジョブを緑にすると、失敗したデプロイが
+  # 「あとから理由の分からない 500」として出てくるので、この待機は外せない
+  # (.github/workflows/backend-deploy.yml)。UpdateFunctionCode だけを許して
+  # 待機に必要な読み取りを落とすと、コードは差し替わったのにジョブは赤、
+  # という一番読みにくい失敗になる。
   statement {
-    sid       = "UpdateLambdaCode"
-    effect    = "Allow"
-    actions   = ["lambda:UpdateFunctionCode", "lambda:GetFunction"]
+    sid    = "UpdateLambdaCode"
+    effect = "Allow"
+    actions = [
+      "lambda:UpdateFunctionCode",
+      "lambda:GetFunction",
+      "lambda:GetFunctionConfiguration",
+    ]
     resources = ["arn:aws:lambda:${var.region}:${data.aws_caller_identity.current.account_id}:function:edgewatcher-${each.value}-*"]
   }
 
