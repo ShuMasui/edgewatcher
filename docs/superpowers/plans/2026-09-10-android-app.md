@@ -337,8 +337,6 @@ android {
     kotlinOptions { jvmTarget = "17" }
 }
 
-ksp { arg("room.schemaLocation", "$projectDir/schemas") }
-
 dependencies {
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.activity.compose)
@@ -472,7 +470,7 @@ local.properties
 
 `MainActivity` と `ObservationService` と `BootReceiver` と `AlarmReceiver` はまだ無いので、
 この時点ではマニフェストの参照解決でリンクが失敗する。**Step 7 のマニフェストから
-`<activity>` `<service>` `<receiver>` の3ブロックを一時的にコメントアウトし**、
+`<activity>` `<service>` `<receiver>` x2 の**4ブロック**を一時的にコメントアウトし**、
 アプリ本体だけが通ることを確認する。Task 20 でコメントを外す。
 
 Run: `cd android && ./gradlew :app:assembleDebug`
@@ -2562,7 +2560,7 @@ import androidx.room.Database
 import androidx.room.RoomDatabase
 
 /** スキーマは v1 のみ。変更時は fallbackToDestructiveMigration で作り直す。 */
-@Database(entities = [ObservationEntity::class], version = 1, exportSchema = true)
+@Database(entities = [ObservationEntity::class], version = 1, exportSchema = false)
 abstract class ObservationDatabase : RoomDatabase() {
     abstract fun observations(): ObservationDao
 }
@@ -2667,7 +2665,7 @@ Expected: `BUILD SUCCESSFUL`
 - [ ] **Step 5: コミット**
 
 ```bash
-git add android/app/src/main/java/com/edgewatcher/infrastructure/db/ android/app/schemas/
+git add android/app/src/main/java/com/edgewatcher/infrastructure/db/
 git commit -m "feat(android): バッファの永続化を Room とファイルで実装する"
 ```
 
@@ -3115,7 +3113,7 @@ object Notifications {
 
 `ObservationService` と `MainActivity` がまだ無いため、この時点では
 `Unresolved reference` が出る。**このタスクではビルドを通さない。**
-Task 18 の Step 4 でまとめて確認する。
+Task 18 の Step 6 でまとめて確認する。
 
 - [ ] **Step 4: コミット**
 
@@ -3173,6 +3171,7 @@ import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -3265,8 +3264,17 @@ class ObservationService : LifecycleService() {
         publishState()
     }
 
-    /** Empty か Deferred になるまで送り続ける。Revoked なら止めて画面へ知らせる。 */
+    /**
+     * 送れるだけ送る。
+     *
+     * Deferred はバックオフして同じ周期の中で再試行する。**ここで delay を使えるのは
+     * PARTIAL_WAKE_LOCK を保持しているためである**（保持していなければ画面 OFF 中に
+     * 発火しない）。次の撮影時刻を追い越さないよう、累計が撮影間隔に達したら諦めて
+     * アラームに任せる。
+     */
     private suspend fun drainQueue() {
+        val intervalSeconds = store.readInterval().minutes * 60L
+        var spent = 0L
         while (true) {
             when (uploadNext()) {
                 is UploadNextObservationUseCase.Outcome.Sent -> {
@@ -3281,7 +3289,10 @@ class ObservationService : LifecycleService() {
 
                 UploadNextObservationUseCase.Outcome.Deferred -> {
                     consecutiveFailures += 1
-                    return
+                    val wait = backoffSeconds()
+                    if (spent + wait >= intervalSeconds) return
+                    spent += wait
+                    delay(wait * 1000L)
                 }
 
                 UploadNextObservationUseCase.Outcome.Revoked -> {
@@ -3294,19 +3305,23 @@ class ObservationService : LifecycleService() {
     }
 
     /**
-     * 次回の撮影時刻を置く。送信に失敗している間はバックオフを効かせるが、
-     * **撮影の間隔そのものは縮めも延ばしもしない。** リトライ中も定期撮影は止めない
-     * という要件があり、撮った画像はバッファに積まれる。
+     * 次回の撮影時刻を置く。
+     *
+     * **撮影の間隔は送信の成否で変わらない。** リトライ中も定期撮影は止めないという
+     * 要件があり、撮った画像はバッファに積まれる。送信のバックオフは撮影周期とは
+     * 別に drainQueue が持つ（backoffSeconds）。
      */
     private fun scheduleNext() {
-        val intervalSeconds = store.readInterval().minutes * 60L
-        val backoff = if (consecutiveFailures == 0) {
+        alarms.scheduleNext(clock.now().plusSeconds(store.readInterval().minutes * 60L))
+    }
+
+    /** 連続失敗回数 n に対して min(5 * 2^(n-1), 300) 秒。 */
+    private fun backoffSeconds(): Long =
+        if (consecutiveFailures == 0) {
             0L
         } else {
             min(5.0 * 2.0.pow(consecutiveFailures - 1), 300.0).toLong()
         }
-        alarms.scheduleNext(clock.now().plusSeconds(min(intervalSeconds, intervalSeconds + backoff)))
-    }
 
     /**
      * 状態の真実の源はバッファの残数。**ここで送信を試みてはならない。**
@@ -3665,7 +3680,7 @@ git commit -m "feat(android): 依存の組み立てを最外装に置く"
 - Create: `android/app/src/main/java/com/edgewatcher/presentation/pairing/PairingScreen.kt`
 - Create: `android/app/src/main/java/com/edgewatcher/presentation/running/RunningViewModel.kt`
 - Create: `android/app/src/main/java/com/edgewatcher/presentation/running/RunningScreen.kt`
-- Modify: `android/app/src/main/AndroidManifest.xml`（Task 1 Step 10 でコメントアウトした3ブロックを戻す）
+- Modify: `android/app/src/main/AndroidManifest.xml`（Task 1 Step 10 でコメントアウトした4ブロックを戻す）
 
 **Interfaces:**
 - Consumes: `PairDeviceUseCase` `LogoutDeviceUseCase`（Task 7）、`ObservationService`（Task 15）、
@@ -3699,6 +3714,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -3983,7 +3999,6 @@ class RunningViewModel @Inject constructor(
 package com.edgewatcher.presentation.running
 
 import android.content.ComponentName
-import android.content.Context
 import android.content.Intent
 import android.content.ServiceConnection
 import android.os.IBinder
@@ -4047,11 +4062,9 @@ fun RunningScreen(
                 binder = null
             }
         }
-        context.bindService(
-            Intent(context, ObservationService::class.java),
-            connection,
-            Context.BIND_ADJUST_WITH_ACTIVITY,
-        )
+        // フラグ 0。BIND_AUTO_CREATE を付けないのは、bind で Service を生成させない
+        // ため。生存は startForegroundService が持ち、bind は覗き窓にすぎない。
+        context.bindService(Intent(context, ObservationService::class.java), connection, 0)
         onDispose {
             // unbind の前に必ず外す。付けっぱなしにすると、閉じた画面の Surface を
             // Service が掴み続け、カメラが開いたまま発熱する。
@@ -4061,9 +4074,12 @@ fun RunningScreen(
         }
     }
 
-    val state by (binder?.state?.collectAsState() ?: remember {
-        androidx.compose.runtime.mutableStateOf<ObservationState>(ObservationState.Stopped)
-    })
+    // binder は接続前 null になる。collectAsState を条件分岐の中で呼ぶと
+    // Composable の呼び出し規則を破るため、produceState で包んで無条件に1回だけ呼ぶ。
+    val state by produceState<ObservationState>(ObservationState.Stopped, binder) {
+        val connected = binder
+        if (connected == null) value = ObservationState.Stopped else connected.state.collect { value = it }
+    }
 
     Column(
         modifier = Modifier.fillMaxSize().padding(24.dp),
@@ -4209,7 +4225,7 @@ class MainActivity : ComponentActivity() {
 - [ ] **Step 5: マニフェストのコメントを外す**
 
 Task 1 Step 10 でコメントアウトした `<activity>` `<service>` `<receiver>` の
-3ブロックを元に戻す。
+4ブロック（activity 1・service 1・receiver 2）を元に戻す。
 
 - [ ] **Step 6: ビルドとテストが通ることを確認する**
 
