@@ -19,7 +19,7 @@ terraform {
   # で state を移す。バケット名は決め打ちでよい(下記)。詳細は infra/README.md。
   #
   # backend "s3" {
-  #   bucket       = "edgewatcher-tfstate-606030504329"
+  #   bucket       = "edgewatcher-tfstate-606030504329-001"
   #   key          = "bootstrap/terraform.tfstate"
   #   region       = "us-east-1"
   #   encrypt      = true
@@ -28,7 +28,7 @@ terraform {
 }
 
 provider "aws" {
-  region = var.region
+  region  = var.region
   profile = var.profile
 
   default_tags {

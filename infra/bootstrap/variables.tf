@@ -6,6 +6,6 @@ variable "region" {
 
 variable "profile" {
   description = "AWS profile名です"
-  type = string
-  default = "edgewatcher"
+  type        = string
+  default     = "edgewatcher"
 }

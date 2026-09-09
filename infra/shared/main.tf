@@ -135,13 +135,13 @@ locals {
 }
 
 # tfstate バケットの名前は bootstrap が
-#   edgewatcher-tfstate-<アカウントID>
-# で決めている。変数で受け取るのをやめて同じ規則で組み立てるのは、
+#   edgewatcher-tfstate-<アカウントID>-<version>
+# で決めている(infra/bootstrap/main.tf の local.bucket_name)。変数で受け取るのをやめて同じ規則で組み立てるのは、
 # 「apply のたびに正しい名前を渡す」という手順を消すため。渡し忘れると
 # ci-plan ロールが実在しないバケットへの許可を持つだけになり、失敗が
 # apply 時ではなく plan ワークフローの実行時まで遅れて現れる。
 locals {
-  tfstate_bucket = "edgewatcher-tfstate-${data.aws_caller_identity.current.account_id}"
+  tfstate_bucket = "edgewatcher-tfstate-${data.aws_caller_identity.current.account_id}-001"
 }
 
 data "aws_iam_policy_document" "tfstate_read" {
