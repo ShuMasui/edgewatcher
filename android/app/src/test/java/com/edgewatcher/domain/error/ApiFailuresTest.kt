@@ -54,6 +54,17 @@ class ApiFailuresTest {
     }
 
     @Test
+    fun `token refresh only revokes on 401, never on another 4xx`() {
+        // POST /device/token documents a 400 (VALIDATION_ERROR). 401 is the ONLY
+        // response that proves the deviceSecret is invalid; widening the branch to
+        // any 4xx would erase credentials on a malformed request, and recovery
+        // needs a QR reissued on the web plus a trip to the mounting site.
+        assertEquals(ApiFailure.Retryable, ApiFailures.forTokenRefresh(400))
+        assertEquals(ApiFailure.Retryable, ApiFailures.forTokenRefresh(403))
+        assertEquals(ApiFailure.Retryable, ApiFailures.forTokenRefresh(404))
+    }
+
+    @Test
     fun `a network error never revokes the credentials`() {
         assertEquals(ApiFailure.Retryable, ApiFailures.forNetworkError())
     }

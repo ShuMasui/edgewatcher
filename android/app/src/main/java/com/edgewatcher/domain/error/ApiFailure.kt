@@ -10,7 +10,7 @@ sealed interface ApiFailure {
     /** 5xx・タイムアウト・通信断。バックオフして同じものを再試行してよい。 */
     data object Retryable : ApiFailure
 
-    /** 400 / 413。本文に起因するため、再送しても永久に通らない。捨てる。 */
+    /** 400 / 413、および解釈できない 4xx。本文に起因するため、再送しても永久に通らない。捨てる。 */
     data object Discard : ApiFailure
 
     /** 401 / 403。セッションが切れた。POST /device/token で再取得する。 */
