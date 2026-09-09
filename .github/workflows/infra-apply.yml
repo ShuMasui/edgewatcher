@@ -17,17 +17,17 @@ on:
   workflow_dispatch:
     inputs:
       environment:
-        description: '対象の環境'
+        description: "対象の環境"
         type: choice
         options: [dev, prod]
         default: dev
       action:
-        description: 'plan は差分を出すだけ。apply は適用する'
+        description: "plan は差分を出すだけ。apply は適用する"
         type: choice
         options: [plan, apply]
         default: plan
       stack:
-        description: '対象のスタック'
+        description: "対象のスタック"
         type: choice
         options: [envs/dev, shared]
         default: envs/dev
@@ -39,8 +39,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  AWS_REGION: ap-northeast-1
-  TERRAFORM_VERSION: '1.15.7'
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: "1.15.7"
 
 permissions:
   contents: read

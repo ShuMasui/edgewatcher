@@ -7,7 +7,13 @@ variable "env" {
 variable "region" {
   description = "リージョン。"
   type        = string
-  default     = "ap-northeast-1"
+  default     = "us-east-1"
+}
+
+variable "profile" {
+  description = "AWS profile名です"
+  type = string
+  default = "edgewatcher"
 }
 
 variable "root_domain" {

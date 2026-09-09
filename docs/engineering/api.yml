@@ -70,7 +70,7 @@ servers:
       apiId:
         default: example123
       region:
-        default: ap-northeast-1
+        default: us-east-1
 
 tags:
   - name: web

@@ -79,7 +79,7 @@ func TestObservationKeys_AlreadyJSTInputAgrees(t *testing.T) {
 func newTestSigner(t *testing.T, ttl time.Duration) *Signer {
 	t.Helper()
 	client := s3.NewFromConfig(aws.Config{
-		Region:      "ap-northeast-1",
+		Region:      "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider("AKIAEXAMPLE", "secret", ""),
 	})
 	return NewSigner(s3.NewPresignClient(client), "ew-images-dev", ttl)

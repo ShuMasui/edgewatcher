@@ -14,16 +14,16 @@ on:
   push:
     branches: [develop]
     paths:
-      - 'web/**'
-      - '.github/workflows/web-deploy.yml'
+      - "web/**"
+      - ".github/workflows/web-deploy.yml"
   pull_request:
     paths:
-      - 'web/**'
-      - '.github/workflows/web-deploy.yml'
+      - "web/**"
+      - ".github/workflows/web-deploy.yml"
   workflow_dispatch:
     inputs:
       environment:
-        description: 'Deploy target'
+        description: "Deploy target"
         type: choice
         options: [dev, prod]
         default: dev
@@ -35,8 +35,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  NODE_VERSION: '22'
-  AWS_REGION: ap-northeast-1
+  NODE_VERSION: "22"
+  AWS_REGION: us-east-1
 
 permissions:
   contents: read
@@ -128,7 +128,7 @@ jobs:
           # それは配信元の CloudFront ドメインそのものである。値を焼き込むと
           # Cognito 側に登録したコールバック URL と二重管理になり、ずれた
           # ときに redirect_mismatch でログインできなくなる。
-          VITE_USE_MOCK: 'false'
+          VITE_USE_MOCK: "false"
         run: npm run build
 
       # ロール名は infra/shared が決めている(edgewatcher-ci-deploy-<env>)。

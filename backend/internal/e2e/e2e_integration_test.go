@@ -104,7 +104,7 @@ func newStack(t *testing.T) *stack {
 	// A real presign client with dummy credentials: signing is pure
 	// computation, so this produces genuine URLs without any network.
 	presign := s3.NewPresignClient(s3.NewFromConfig(aws.Config{
-		Region:      "ap-northeast-1",
+		Region:      "us-east-1",
 		Credentials: credentials.NewStaticCredentialsProvider("AKIAEXAMPLE", "secret", ""),
 	}))
 	mapper := api.NewMapper(images.NewSigner(presign, "ew-images-test", 900*time.Second))

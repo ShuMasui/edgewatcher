@@ -7,7 +7,7 @@
 
 ## 1. 前提
 
-- リージョンは **ap-northeast-1**(東京)。観測デバイス・利用者ともに国内を想定しており、
+- リージョンは **us-east-1**(東京)。観測デバイス・利用者ともに国内を想定しており、
   アップロードのレイテンシと転送コストの両面で最短になる
 - AWS アカウントは **単一**。dev / prod はリソース名のプレフィックスで分離する
 - 全リソースを Terraform で管理する。コンソールでの手動変更は行わない
@@ -27,12 +27,12 @@ Organizations によるアカウント分離のほうが事故の爆発半径は
 
 state を3層に分ける。
 
-| スタック | 持つもの | apply 頻度 | state の置き場 |
-| --- | --- | --- | --- |
-| `bootstrap` | tfstate 用 S3 バケット | ほぼ一度きり | 自分自身が作ったバケット |
-| `shared` | Route53 ホストゾーン、GitHub Actions 用 OIDC プロバイダと IAM ロール | 年数回 | `shared/terraform.tfstate` |
-| `envs/dev` | dev のアプリケーションリソース一式 | 機能追加のたび | `envs/dev/terraform.tfstate` |
-| `envs/prod` | prod のアプリケーションリソース一式 | 機能追加のたび | `envs/prod/terraform.tfstate` |
+| スタック    | 持つもの                                                             | apply 頻度     | state の置き場                |
+| ----------- | -------------------------------------------------------------------- | -------------- | ----------------------------- |
+| `bootstrap` | tfstate 用 S3 バケット                                               | ほぼ一度きり   | 自分自身が作ったバケット      |
+| `shared`    | Route53 ホストゾーン、GitHub Actions 用 OIDC プロバイダと IAM ロール | 年数回         | `shared/terraform.tfstate`    |
+| `envs/dev`  | dev のアプリケーションリソース一式                                   | 機能追加のたび | `envs/dev/terraform.tfstate`  |
+| `envs/prod` | prod のアプリケーションリソース一式                                  | 機能追加のたび | `envs/prod/terraform.tfstate` |
 
 ```text
 infra/
@@ -64,10 +64,10 @@ infra/
 `root_domain`(OPS-01)と `google_client_id`(AUTH-07)が未確定でも構築を止めないため、
 **これらを `null` 許容の変数にし、`count` で関連リソースの作成を切り替える**。
 
-| 変数 | `null` のとき |
-| --- | --- |
-| `root_domain` | Route53・ACM・カスタムドメインを作らない。CloudFront と API Gateway の既定ドメインで動作する |
-| `google_client_id` | Google IdP を作らない。User Pool と Hosted UI だけが立つ |
+| 変数               | `null` のとき                                                                                |
+| ------------------ | -------------------------------------------------------------------------------------------- |
+| `root_domain`      | Route53・ACM・カスタムドメインを作らない。CloudFront と API Gateway の既定ドメインで動作する |
+| `google_client_id` | Google IdP を作らない。User Pool と Hosted UI だけが立つ                                     |
 
 確定したら値を埋めて apply するだけでよく、**コードの書き換えは発生しない**。
 同じ仕組みを2つの異なる外部依存に適用することで、扱い方が1つに揃う。
@@ -97,11 +97,11 @@ Terraform を動かすための資格情報そのものは Terraform では作�
 
 「**Terraform の入力になる ID は手動、Terraform の出力になる ID は Terraform**」で線を引く。
 
-| ID | 作り方 |
-| --- | --- |
-| 開発者本人の IAM ユーザー(+ MFA、アクセスキー) | 手動。Terraform の管理対象外 |
-| GitHub Actions の OIDC ロール(plan / apply / deploy) | Terraform(`shared`) |
-| Lambda の実行ロール | Terraform(`lambda` モジュール) |
+| ID                                                   | 作り方                         |
+| ---------------------------------------------------- | ------------------------------ |
+| 開発者本人の IAM ユーザー(+ MFA、アクセスキー)       | 手動。Terraform の管理対象外   |
+| GitHub Actions の OIDC ロール(plan / apply / deploy) | Terraform(`shared`)            |
+| Lambda の実行ロール                                  | Terraform(`lambda` モジュール) |
 
 理由は3点。
 
@@ -153,9 +153,9 @@ shared 側のリファクタリングが env を壊す。ドメイン名とい�
 
 ルートドメインを1つ取得し、ホストゾーンも1つ。環境ごとにサブドメインで分ける。
 
-| 用途 | prod | dev |
-| --- | --- | --- |
-| Web(CloudFront) | `app.<root-domain>` | `app.dev.<root-domain>` |
+| 用途             | prod                | dev                     |
+| ---------------- | ------------------- | ----------------------- |
+| Web(CloudFront)  | `app.<root-domain>` | `app.dev.<root-domain>` |
 | API(API Gateway) | `api.<root-domain>` | `api.dev.<root-domain>` |
 
 ホストゾーンは `shared` が持ち、A/AAAA レコードは各 env スタックが自分の分だけを作る。
@@ -164,7 +164,7 @@ shared 側のリファクタリングが env を壊す。ドメイン名とい�
 ### ACM 証明書は環境ごとに2枚必要
 
 - **CloudFront 用**: `us-east-1` に存在しなければならない(CloudFront の仕様)
-- **API Gateway カスタムドメイン用**: API と同じ `ap-northeast-1` に必要
+- **API Gateway カスタムドメイン用**: API と同じ `us-east-1` に必要
 
 `modules/domain` がこの2枚をまとめて作り、呼び出し側から2つの provider エイリアスを受け取る。
 リージョン制約をモジュールの内側に閉じ込め、env 側のコードに `us-east-1` が漏れないようにする。
@@ -173,7 +173,7 @@ shared 側のリファクタリングが env を壊す。ドメイン名とい�
 module "domain" {
   source    = "../../modules/domain"
   providers = {
-    aws           = aws            # ap-northeast-1
+    aws           = aws            # us-east-1
     aws.us_east_1 = aws.us_east_1
   }
   zone_id     = data.aws_route53_zone.root.zone_id
@@ -189,25 +189,25 @@ module "domain" {
 切る基準は2つ。**一緒に置換されるか**(ライフサイクルが同じか)と、
 **外に見せるインターフェースがあるか**(出力が他モジュールの入力になるか)。
 
-| モジュール | 責務 | 主な出力 |
-| --- | --- | --- |
-| `domain` | ACM 証明書2枚 + DNS 検証レコード | 証明書 ARN ×2 |
-| `cognito-web` | Web User Pool、App Client、Google IdP、Hosted UI ドメイン | User Pool ID、Client ID、issuer URL |
-| `data` | DynamoDB シングルテーブル(TTL 属性・GSI を含む) | テーブル名、テーブル ARN |
-| `storage-images` | 画像バケット、ライフサイクルルール、パブリックアクセス全遮断 | バケット名、バケット ARN |
-| `web-hosting` | 配信バケット、CloudFront ディストリビューション、OAC、SPA フォールバック | ディストリビューション ドメイン名 |
-| `api` | API Gateway HTTP API、ルート定義、オーソライザ2種、カスタムドメイン紐付け | API エンドポイント、実行 ARN |
-| `lambda` | Lambda 関数1つ分(関数・IAM ロール・ロググループ・権限) | 関数 ARN、Invoke ARN |
+| モジュール       | 責務                                                                      | 主な出力                            |
+| ---------------- | ------------------------------------------------------------------------- | ----------------------------------- |
+| `domain`         | ACM 証明書2枚 + DNS 検証レコード                                          | 証明書 ARN ×2                       |
+| `cognito-web`    | Web User Pool、App Client、Google IdP、Hosted UI ドメイン                 | User Pool ID、Client ID、issuer URL |
+| `data`           | DynamoDB シングルテーブル(TTL 属性・GSI を含む)                           | テーブル名、テーブル ARN            |
+| `storage-images` | 画像バケット、ライフサイクルルール、パブリックアクセス全遮断              | バケット名、バケット ARN            |
+| `web-hosting`    | 配信バケット、CloudFront ディストリビューション、OAC、SPA フォールバック  | ディストリビューション ドメイン名   |
+| `api`            | API Gateway HTTP API、ルート定義、オーソライザ2種、カスタムドメイン紐付け | API エンドポイント、実行 ARN        |
+| `lambda`         | Lambda 関数1つ分(関数・IAM ロール・ロググループ・権限)                    | 関数 ARN、Invoke ARN                |
 
 ### `retention_days` は3箇所に配る
 
 保持期間(dev = 1、prod = 7)は env の変数として1箇所で定義し、そこから3つの宛先に配る。
 
-| 宛先 | 用途 |
-| --- | --- |
-| `storage-images` | S3 ライフサイクルルールの日数 |
-| `lambda` の環境変数 | 観測レコードの `expiresAt`(DynamoDB TTL)の計算 |
-| API のレスポンス(`GET /app-config`) | Web が履歴を遡れる範囲(`retentionDays`)の決定 |
+| 宛先                                | 用途                                           |
+| ----------------------------------- | ---------------------------------------------- |
+| `storage-images`                    | S3 ライフサイクルルールの日数                  |
+| `lambda` の環境変数                 | 観測レコードの `expiresAt`(DynamoDB TTL)の計算 |
+| API のレスポンス(`GET /app-config`) | Web が履歴を遡れる範囲(`retentionDays`)の決定  |
 
 同じ値が S3 と DynamoDB の両方に効くため、変数を1つにしておかないと
 「画像はないのにレコードだけ残る」ずれが生じる。
@@ -256,13 +256,13 @@ resource "aws_lambda_function" "this" {
 
 HTTP API を1つ作り、経路によってオーソライザを使い分ける。
 
-| 経路 | オーソライザ | 実体 |
-| --- | --- | --- |
-| `/devices/*`(Web からの端末管理) | JWT オーソライザ | Cognito Web Pool の issuer を指定。Lambda 不要 |
-| `/observations/*`(Web からの閲覧) | JWT オーソライザ | 同上 |
-| `/app-config`(Web の環境定数) | JWT オーソライザ | 同上。非機密だが例外を作らない(`03-web.md` §3.8) |
-| `/device/token`, `/device/pair` | なし(認証前) | Lambda 内でコード/シークレットを検証 |
-| `/device/uploads`, `/device/logout` | Lambda オーソライザ | DynamoDB を引いて端末セッションを検証 |
+| 経路                                | オーソライザ        | 実体                                             |
+| ----------------------------------- | ------------------- | ------------------------------------------------ |
+| `/devices/*`(Web からの端末管理)    | JWT オーソライザ    | Cognito Web Pool の issuer を指定。Lambda 不要   |
+| `/observations/*`(Web からの閲覧)   | JWT オーソライザ    | 同上                                             |
+| `/app-config`(Web の環境定数)       | JWT オーソライザ    | 同上。非機密だが例外を作らない(`03-web.md` §3.8) |
+| `/device/token`, `/device/pair`     | なし(認証前)        | Lambda 内でコード/シークレットを検証             |
+| `/device/uploads`, `/device/logout` | Lambda オーソライザ | DynamoDB を引いて端末セッションを検証            |
 
 **Lambda オーソライザのレスポンスキャッシュは無効(TTL = 0)にする。** Web から端末を削除した瞬間に、
 有効期限が残っているトークンでも拒否される、という即時失効の性質は毎リクエストの GetItem が支えている。
@@ -293,12 +293,12 @@ Web 側に Cognito 組み込みの JWT オーソライザを使うのは、Lambd
 長期のアクセスキーは発行しない。`shared` に GitHub OIDC プロバイダを1つ作り、
 **plan 用と apply 用でロールを分離**する。
 
-| ロール | 権限 | 使うワークフロー |
-| --- | --- | --- |
-| `edgewatcher-ci-plan` | 読み取り専用(`ReadOnlyAccess` 相当)+ tfstate の読み取り | PR 時の `terraform plan` |
-| `edgewatcher-ci-apply-dev` | dev リソースへの書き込み | `workflow_dispatch` の dev apply |
-| `edgewatcher-ci-apply-prod` | prod リソースへの書き込み | `workflow_dispatch` の prod apply |
-| `edgewatcher-ci-deploy-<env>` | Lambda の `UpdateFunctionCode`、S3 同期、CloudFront invalidation | アプリコードのデプロイ |
+| ロール                        | 権限                                                             | 使うワークフロー                  |
+| ----------------------------- | ---------------------------------------------------------------- | --------------------------------- |
+| `edgewatcher-ci-plan`         | 読み取り専用(`ReadOnlyAccess` 相当)+ tfstate の読み取り          | PR 時の `terraform plan`          |
+| `edgewatcher-ci-apply-dev`    | dev リソースへの書き込み                                         | `workflow_dispatch` の dev apply  |
+| `edgewatcher-ci-apply-prod`   | prod リソースへの書き込み                                        | `workflow_dispatch` の prod apply |
+| `edgewatcher-ci-deploy-<env>` | Lambda の `UpdateFunctionCode`、S3 同期、CloudFront invalidation | アプリコードのデプロイ            |
 
 PR で自動実行される plan には読み取りロールしか渡らないため、PR 経由で本番リソースが変更される経路が
 構造的に閉じる。apply ロールは信頼ポリシーで `workflow_dispatch` を起点とするワークフロー

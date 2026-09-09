@@ -1,7 +1,7 @@
 variable "region" {
   description = "リージョン。"
   type        = string
-  default     = "ap-northeast-1"
+  default     = "us-east-1"
 }
 
 variable "github_owner" {

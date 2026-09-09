@@ -15,10 +15,10 @@ infra/
 
 **2つの未決事項がブロッカーになりうるため、optional 変数で切り離してある。**
 
-| 変数 | `null` のとき | 参照 |
-| --- | --- | --- |
-| `root_domain` | Route53・ACM・カスタムドメインを作らない。`*.cloudfront.net` と `execute-api` の既定 URL で動作する | OPS-01 |
-| `google_idp_enabled` | Google IdP を作らない。User Pool と Hosted UI だけが立つ(この間は誰もログインできない) | AUTH-07 |
+| 変数                 | `null` のとき                                                                                       | 参照    |
+| -------------------- | --------------------------------------------------------------------------------------------------- | ------- |
+| `root_domain`        | Route53・ACM・カスタムドメインを作らない。`*.cloudfront.net` と `execute-api` の既定 URL で動作する | OPS-01  |
+| `google_idp_enabled` | Google IdP を作らない。User Pool と Hosted UI だけが立つ(この間は誰もログインできない)              | AUTH-07 |
 
 **確定したら値を埋めて apply するだけでよい。**コードの書き換えは不要。
 
@@ -46,7 +46,7 @@ Terraform を動かすための資格情報そのものは Terraform では作�
 [edgewatcher]
 aws_access_key_id     = ...
 aws_secret_access_key = ...
-region                = ap-northeast-1
+region                = us-east-1
 ```
 
 ```sh
@@ -121,10 +121,10 @@ terraform apply
 
 作られるロール:
 
-| ロール | 権限 | 使うワークフロー |
-| --- | --- | --- |
-| `edgewatcher-ci-plan` | 読み取り専用 + tfstate の読み取り | PR 時の `terraform plan` |
-| `edgewatcher-ci-apply-dev` / `-prod` | 書き込み | `workflow_dispatch` の apply |
+| ロール                                | 権限                                                  | 使うワークフロー                |
+| ------------------------------------- | ----------------------------------------------------- | ------------------------------- |
+| `edgewatcher-ci-plan`                 | 読み取り専用 + tfstate の読み取り                     | PR 時の `terraform plan`        |
+| `edgewatcher-ci-apply-dev` / `-prod`  | 書き込み                                              | `workflow_dispatch` の apply    |
 | `edgewatcher-ci-deploy-dev` / `-prod` | Lambda のコード更新、S3 同期、CloudFront invalidation | `backend-deploy` / `web-deploy` |
 
 PR で自動実行される plan には読み取りロールしか渡らないため、
@@ -233,12 +233,12 @@ WEB=$(terraform output -raw web_url)
 API=$(terraform output -raw api_url)
 ```
 
-| # | 確認 | 期待 |
-| --- | --- | --- |
-| 1 | `open $WEB` | 疎通確認用ページが表示される |
-| 2 | `curl -s -o /dev/null -w '%{http_code}\n' $WEB/no-such-path` | `200`(SPA フォールバック) |
-| 3 | `curl -s -o /dev/null -w '%{http_code}\n' $API/devices` | `401`(JWT オーソライザが未認証を拒否) |
-| 4 | `curl -s -o /dev/null -w '%{http_code}\n' $API/device/uploads -X POST` | `401`(Lambda オーソライザが拒否) |
+| #   | 確認                                                                   | 期待                                  |
+| --- | ---------------------------------------------------------------------- | ------------------------------------- |
+| 1   | `open $WEB`                                                            | 疎通確認用ページが表示される          |
+| 2   | `curl -s -o /dev/null -w '%{http_code}\n' $WEB/no-such-path`           | `200`(SPA フォールバック)             |
+| 3   | `curl -s -o /dev/null -w '%{http_code}\n' $API/devices`                | `401`(JWT オーソライザが未認証を拒否) |
+| 4   | `curl -s -o /dev/null -w '%{http_code}\n' $API/device/uploads -X POST` | `401`(Lambda オーソライザが拒否)      |
 
 **3 と 4 が通れば、オーソライザとルーティングの結線は正しい。**
 これらは Lambda を呼ぶ前に判定されるため、ハンドラのコードがなくても検証できる。
@@ -259,13 +259,13 @@ Variables に置く(Secrets はマスクされるためログが読みにくく�
 Environment(`dev` / `prod`)ごとに設定する。ワークフローは
 `environment:` を宣言しているので、`vars.*` は環境ごとに解決される。
 
-| 変数 | 取得元 | 使うワークフロー |
-| --- | --- | --- |
-| `AWS_ACCOUNT_ID` | `terraform -chdir=infra/bootstrap output -raw account_id` | 全て(ロール ARN の組み立て) |
-| `VITE_API_BASE_URL` | `terraform output -raw api_url` | web-deploy |
-| `VITE_COGNITO_DOMAIN` | `terraform output -raw cognito_hosted_ui` | web-deploy |
-| `VITE_COGNITO_CLIENT_ID` | `terraform output -raw cognito_client_id` | web-deploy |
-| `CLOUDFRONT_DISTRIBUTION_ID` | `terraform output -raw cloudfront_distribution_id` | web-deploy |
+| 変数                         | 取得元                                                    | 使うワークフロー            |
+| ---------------------------- | --------------------------------------------------------- | --------------------------- |
+| `AWS_ACCOUNT_ID`             | `terraform -chdir=infra/bootstrap output -raw account_id` | 全て(ロール ARN の組み立て) |
+| `VITE_API_BASE_URL`          | `terraform output -raw api_url`                           | web-deploy                  |
+| `VITE_COGNITO_DOMAIN`        | `terraform output -raw cognito_hosted_ui`                 | web-deploy                  |
+| `VITE_COGNITO_CLIENT_ID`     | `terraform output -raw cognito_client_id`                 | web-deploy                  |
+| `CLOUDFRONT_DISTRIBUTION_ID` | `terraform output -raw cloudfront_distribution_id`        | web-deploy                  |
 
 `VITE_REDIRECT_URI` / `VITE_LOGOUT_URI` は**あえて設定しない**。未設定なら
 `web/src/config/env.ts` が `window.location.origin` を使い、それは配信元の
@@ -274,11 +274,11 @@ Environment(`dev` / `prod`)ごとに設定する。ワークフローは
 
 ### ワークフローと使うロールの対応
 
-| ワークフロー | 起点 | ロール | できること |
-| --- | --- | --- | --- |
-| `backend-deploy` | `develop` への push / dispatch | `edgewatcher-ci-deploy-<env>` | Lambda のコード更新のみ |
-| `web-deploy` | `develop` への push / dispatch | `edgewatcher-ci-deploy-<env>` | S3 同期と CloudFront 無効化のみ |
-| `infra-apply` | `main` からの dispatch のみ | `edgewatcher-ci-apply-<env>` | Terraform の apply(管理者権限) |
+| ワークフロー     | 起点                           | ロール                        | できること                      |
+| ---------------- | ------------------------------ | ----------------------------- | ------------------------------- |
+| `backend-deploy` | `develop` への push / dispatch | `edgewatcher-ci-deploy-<env>` | Lambda のコード更新のみ         |
+| `web-deploy`     | `develop` への push / dispatch | `edgewatcher-ci-deploy-<env>` | S3 同期と CloudFront 無効化のみ |
+| `infra-apply`    | `main` からの dispatch のみ    | `edgewatcher-ci-apply-<env>`  | Terraform の apply(管理者権限)  |
 
 **デプロイ用ロールはインフラを変更できない。** ポリシーに Lambda のコード更新・
 Web バケットの同期・invalidation しか入っていないため、アプリのデプロイが

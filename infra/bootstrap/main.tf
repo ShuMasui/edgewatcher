@@ -21,7 +21,7 @@ terraform {
   # backend "s3" {
   #   bucket       = "edgewatcher-tfstate-606030504329"
   #   key          = "bootstrap/terraform.tfstate"
-  #   region       = "ap-northeast-1"
+  #   region       = "us-east-1"
   #   encrypt      = true
   #   use_lockfile = true
   # }
@@ -29,6 +29,7 @@ terraform {
 
 provider "aws" {
   region = var.region
+  profile = var.profile
 
   default_tags {
     tags = {
@@ -45,7 +46,7 @@ data "aws_caller_identity" "current" {}
 locals {
   # S3 のバケット名はグローバルに一意である必要があるため、アカウント ID を付ける
   # (02-infra.md §9)。
-  bucket_name = "edgewatcher-tfstate-${data.aws_caller_identity.current.account_id}"
+  bucket_name = "edgewatcher-tfstate-${data.aws_caller_identity.current.account_id}-001"
 }
 
 resource "aws_s3_bucket" "tfstate" {
