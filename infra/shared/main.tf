@@ -8,8 +8,15 @@ terraform {
     }
   }
 
-  # bucket は bootstrap の出力に依存するため、init に -backend-config で渡す。
+  # tfstate の置き場。backend ブロックには変数も式も書けないため、値は
+  # リテラルで持つ。バケット名は bootstrap が
+  #   edgewatcher-tfstate-<アカウントID>
+  # で決め打ちするので、-backend-config で外から渡す理由がない。
+  # 渡す方式にすると、init のたびに正しい文字列を手で与える必要があり、
+  # 間違えたときに「別の state に向いたまま plan が通る」という最悪の
+  # 壊れ方をする。アカウント ID は秘密ではない(infra/README.md Phase 0)。
   backend "s3" {
+    bucket       = "edgewatcher-tfstate-606030504329"
     key          = "shared/terraform.tfstate"
     region       = "ap-northeast-1"
     encrypt      = true
@@ -127,17 +134,27 @@ locals {
   )
 }
 
+# tfstate バケットの名前は bootstrap が
+#   edgewatcher-tfstate-<アカウントID>
+# で決めている。変数で受け取るのをやめて同じ規則で組み立てるのは、
+# 「apply のたびに正しい名前を渡す」という手順を消すため。渡し忘れると
+# ci-plan ロールが実在しないバケットへの許可を持つだけになり、失敗が
+# apply 時ではなく plan ワークフローの実行時まで遅れて現れる。
+locals {
+  tfstate_bucket = "edgewatcher-tfstate-${data.aws_caller_identity.current.account_id}"
+}
+
 data "aws_iam_policy_document" "tfstate_read" {
   statement {
     effect    = "Allow"
     actions   = ["s3:ListBucket"]
-    resources = ["arn:aws:s3:::${var.tfstate_bucket}"]
+    resources = ["arn:aws:s3:::${local.tfstate_bucket}"]
   }
 
   statement {
     effect    = "Allow"
     actions   = ["s3:GetObject"]
-    resources = ["arn:aws:s3:::${var.tfstate_bucket}/*"]
+    resources = ["arn:aws:s3:::${local.tfstate_bucket}/*"]
   }
 }
 

@@ -4,11 +4,6 @@ variable "region" {
   default     = "ap-northeast-1"
 }
 
-variable "tfstate_bucket" {
-  description = "bootstrap が作った tfstate バケット名。ci-plan ロールの読み取り許可に使う。"
-  type        = string
-}
-
 variable "github_owner" {
   description = "GitHub のオーナー名。OIDC の sub 条件に使う。"
   type        = string

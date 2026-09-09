@@ -1,0 +1,194 @@
+# フロントエンドのデプロイ (docs/02-infra.md §8, docs/00-overview.md §8)。
+#
+# develop への push で dev に出る。backend-deploy.yml と同じ考え方で、
+# **prod だけは workflow_dispatch にしてある**。dev はマージの結果として
+# 出てよいが、prod は人が下す判断である。
+#
+# Terraform はバケットと CloudFront を作るだけで、中身は触らない。
+# 逆にこのワークフローはインフラを一切変更しない。使うロール
+# (edgewatcher-ci-deploy-<env>) が Lambda のコード更新・S3 同期・
+# invalidation しか持っていないので、それは構造として保証されている。
+name: web-deploy
+
+on:
+  push:
+    branches: [develop]
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-deploy.yml'
+  pull_request:
+    paths:
+      - 'web/**'
+      - '.github/workflows/web-deploy.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Deploy target'
+        type: choice
+        options: [dev, prod]
+        default: dev
+
+concurrency:
+  # 2つの同期が競ると、後に終わったほうが残る。それが新しいコミットとは
+  # 限らない。
+  group: web-deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NODE_VERSION: '22'
+  AWS_REGION: ap-northeast-1
+
+permissions:
+  contents: read
+
+jobs:
+  # PR でも走らせる。デプロイするブランチ(develop)に入る前に落とすため。
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install
+        working-directory: web
+        run: npm ci
+
+      - name: Unit tests
+        working-directory: web
+        run: npm test
+
+      # tsc -b も走る(package.json の build)。型エラーはここで落ちる。
+      - name: Type check and build
+        working-directory: web
+        run: npm run build
+
+  deploy:
+    needs: verify
+    # フォークの PR が AWS アカウントへ成果物を publish できてはならない。
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    permissions:
+      contents: read
+      # OIDC。長期のアクセスキーは持たない(infra/shared/main.tf)。
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      # ビルド時に値が焼き込まれるため、verify の成果物は再利用できない。
+      # 環境ごとに API と Cognito が違う以上、成果物も環境ごとに別物になる。
+      - name: Install
+        working-directory: web
+        run: npm ci
+
+      # 値が欠けたままビルドすると、src/config/env.ts の判定により
+      # **モックのまま本番に出る**。ログインもできないのに画面は動いて
+      # 見えるので、デプロイ後に気づくのが最も遅い壊れ方になる。
+      # ここで落とすのはそのため。
+      - name: Check the build-time configuration
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_COGNITO_DOMAIN: ${{ vars.VITE_COGNITO_DOMAIN }}
+          VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID }}
+        run: |
+          set -euo pipefail
+          missing=()
+          for name in VITE_API_BASE_URL VITE_COGNITO_DOMAIN VITE_COGNITO_CLIENT_ID; do
+            [ -n "${!name:-}" ] || missing+=("$name")
+          done
+          if [ ${#missing[@]} -ne 0 ]; then
+            echo "::error::環境変数が未設定です: ${missing[*]}"
+            echo "GitHub の Environment (${{ github.event.inputs.environment || 'dev' }}) の変数に設定してください。"
+            echo "値は terraform -chdir=infra/envs/dev output から取れます:"
+            echo "  VITE_API_BASE_URL    <- api_url"
+            echo "  VITE_COGNITO_DOMAIN  <- cognito_hosted_ui"
+            echo "  VITE_COGNITO_CLIENT_ID <- cognito_client_id"
+            exit 1
+          fi
+
+      - name: Build
+        working-directory: web
+        env:
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_COGNITO_DOMAIN: ${{ vars.VITE_COGNITO_DOMAIN }}
+          VITE_COGNITO_CLIENT_ID: ${{ vars.VITE_COGNITO_CLIENT_ID }}
+          # VITE_REDIRECT_URI / VITE_LOGOUT_URI は**渡さない**。
+          # src/config/env.ts は未設定なら window.location.origin を使い、
+          # それは配信元の CloudFront ドメインそのものである。値を焼き込むと
+          # Cognito 側に登録したコールバック URL と二重管理になり、ずれた
+          # ときに redirect_mismatch でログインできなくなる。
+          VITE_USE_MOCK: 'false'
+        run: npm run build
+
+      # ロール名は infra/shared が決めている(edgewatcher-ci-deploy-<env>)。
+      # このロールはインフラを触れない。アカウント ID は秘密ではないので
+      # リポジトリ変数に置く。
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/edgewatcher-ci-deploy-${{ github.event.inputs.environment || 'dev' }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Sync to S3
+        env:
+          ENV_NAME: ${{ github.event.inputs.environment || 'dev' }}
+          ACCOUNT_ID: ${{ vars.AWS_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          # 名前は infra/modules/web-hosting の
+          # "${name_prefix}-web-${account_id}" で決まる。変数に持たせない
+          # のは、Terraform 側を変えたときに片方だけ古いままになるため。
+          bucket="edgewatcher-${ENV_NAME}-web-${ACCOUNT_ID}"
+
+          # assets/ の中身はファイル名にハッシュが入るので、内容が変われば
+          # 名前も変わる。だから恒久キャッシュにしてよい。
+          #
+          # --delete で古いハッシュ資産は即座に消える。古い index.html を
+          # 掴んだままのタブは壊れるが、次の読み込みで直る。MVP では
+          # 猶予期間を設ける仕組みは持たない。
+          aws s3 sync web/dist/assets "s3://${bucket}/assets" \
+            --delete \
+            --cache-control "public,max-age=31536000,immutable" \
+            --no-progress
+
+          # ルート直下(index.html、favicon.svg)はハッシュが付かないので
+          # キャッシュさせない。**assets を先に上げてからここに来る順序が
+          # 重要**で、逆にすると、まだ存在しない資産を指す index.html が
+          # 一瞬だけ配信される。
+          aws s3 sync web/dist "s3://${bucket}" \
+            --delete \
+            --exclude "assets/*" \
+            --cache-control "no-cache" \
+            --no-progress
+
+      - name: Invalidate CloudFront
+        env:
+          DISTRIBUTION_ID: ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${DISTRIBUTION_ID:-}" ]; then
+            echo "::error::CLOUDFRONT_DISTRIBUTION_ID が未設定です(terraform output cloudfront_distribution_id)。"
+            exit 1
+          fi
+          # "/*" にしているのは、以前に別のヘッダで配信された可能性のある
+          # オブジェクト(Terraform が置いた疎通確認用の index.html など)を
+          # 確実に落とすため。無効化は 1 パス分としてしか数えられない。
+          id=$(aws cloudfront create-invalidation \
+                 --distribution-id "$DISTRIBUTION_ID" \
+                 --paths "/*" \
+                 --query Invalidation.Id --output text)
+          echo "invalidation ${id}"
+          # 完了を待つ。待たないと、ジョブが緑になった時点ではまだ古い
+          # 画面が出ている、という状態を成功として報告してしまう。
+          aws cloudfront wait invalidation-completed \
+            --distribution-id "$DISTRIBUTION_ID" --id "$id"
