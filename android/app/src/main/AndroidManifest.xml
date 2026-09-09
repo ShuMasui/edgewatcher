@@ -32,12 +32,6 @@
         android:usesCleartextTraffic="false"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
-        <!--
-        Task 1: MainActivity, ObservationService, BootReceiver and AlarmReceiver do not
-        exist yet, so the manifest's class references would fail to link. The four blocks
-        below are commented out for now and are restored in Task 18.
-        -->
-        <!--
         <activity
             android:name=".presentation.MainActivity"
             android:exported="true"
@@ -48,16 +42,12 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-        -->
 
-        <!--
         <service
             android:name=".infrastructure.service.ObservationService"
             android:exported="false"
             android:foregroundServiceType="camera|location" />
-        -->
 
-        <!--
         <receiver
             android:name=".infrastructure.service.BootReceiver"
             android:exported="true">
@@ -65,12 +55,9 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
-        -->
 
-        <!--
         <receiver
             android:name=".infrastructure.service.AlarmReceiver"
             android:exported="false" />
-        -->
     </application>
 </manifest>

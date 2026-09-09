@@ -31,10 +31,11 @@ class BootReceiver : BroadcastReceiver() {
     @Inject lateinit var store: CredentialStore
 
     override fun onReceive(context: Context, intent: Intent) {
-        // Hilt は生成された基底クラスの onReceive の中でフィールドを注入する。
-        // これを呼ばないと store が未初期化のままになる。**最初に呼ぶこと。**
-        super.onReceive(context, intent)
-
+        // super.onReceive は呼ばない（呼べない）。BroadcastReceiver.onReceive は
+        // abstract なので Kotlin から super 呼び出しができない。Hilt はそのために
+        // 生成した基底クラスへ @OnReceiveBytecodeInjectionMarker を付けており、
+        // Gradle プラグインが inject(context) の呼び出しをこのメソッドの先頭へ
+        // バイトコードで差し込む。したがって store はここで既に注入済みである。
         if (intent.action != Intent.ACTION_BOOT_COMPLETED) return
 
         // 未ペアリングの端末を起こしても、QR スキャナが立つだけで意味がない。
