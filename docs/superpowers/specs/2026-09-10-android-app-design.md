@@ -1,507 +1,602 @@
 # EdgeWatcher Android アプリ 設計
 
-最終更新: 2026-09-10
-ステータス: 設計確定（実装前）
+作成: 2026-09-10（2026-09-10 に全面改訂）
+ステータス: 確定 / 実装未着手
+上位文書: `docs/04-native.md`（機能要件）、`docs/engineering/api.yml`（API 契約）
+モック: `docs/mocks/native-mocks.html`
 
-関連: `docs/04-native.md`（機能要件）/ `docs/06-auth.md`（認証）/
-`docs/engineering/api.yml`（API 契約）/ `docs/mocks/native-mocks.html`（画面モック）/
-`docs/00-overview.md` §5・§6・§7
+`04-native.md` が「何を作るか」を定めるのに対し、本書は「どう作るか」を定める。
+両者が食い違う箇所は本書が優先し、`04-native.md` 側を後追いで修正する（§12）。
 
-## 0. この文書の位置づけ
+> **改訂の記録**: 本書は同名の初版（2026-09-10 04:48 コミット）を差し替えたものである。
+> 初版から変わったのは DI・HTTP クライアント・モジュール構成・サムネイルの寸法・
+> テスト方針の5点で、いずれも「とにかくアプリを完成させる」という優先順位の変更に基づく。
+> **初版を前提に書かれた `docs/superpowers/plans/2026-09-10-android-app.md`（7,971行）は
+> 破棄し、本書から作り直す。**
 
-`04-native.md` が「何を作るか」を定めているのに対し、本書は「どう作るか」を定める。
-`api.yml` は拘束力のある契約であり、本書がそれと食い違った場合は本書が誤りである。
+---
 
-本書で新たに決めたのは、`01-openquestion.md` に `open` / `pending` として残っていた
-APP-01 / APP-03 / APP-04 の3件（§2）と、実装レベルの構造（§3 以降）である。
+## 0. 進め方（この設計に対する制約）
 
-## 1. スコープ
+**本プロジェクトはサブエージェント駆動で開発する。**
 
-`04-native.md` の機能要件をすべて満たす Android アプリを完成させる。
-バックエンド・Web・インフラには手を入れない。API 契約も変更しない。
+- 実装計画は独立して着手できるタスクに分割し、**各タスクを1つのサブエージェントに担当させる**
+- **実装は Haiku または Sonnet に委譲する。Opus は設計・計画・レビュー・統合判断にのみ使う。**
+  これはトークン予算の制約であり、遵守すること
+- タスクの粒度は「担当するサブエージェントが本書の該当セクションと対象ファイルだけを読めば
+  完結する」ところまで落とす。**前後のタスクの文脈を引き継がないと書けないタスクは、
+  分割が足りていない**
+- 各タスクの完了条件は、そのタスク単体で機械的に判定できる形（コンパイルが通る /
+  指定したテストが緑になる）で書く。「動くこと」のような人間の判断を要する条件は
+  §11 の受け入れ手順にまとめ、個々のタスクの完了条件にしない
 
-スコープ外:
+この制約は品質の妥協ではなく、**本書の具体性に対する要求**である。
+委譲できるだけの具体性が本書に無ければ、その部分は設計が終わっていない。
 
-- CI/CD ワークフローの追加（Android の配信は Play Console への手動アップロード。`00-overview.md` §8）
-- 計装テスト（§14 に理由）
-- リリース署名鍵の管理と Play Console への提出
+### 0.1 完成を最優先する
 
-## 2. 確定した未決事項
+機能は `04-native.md` に書かれたものだけを作る。テストは §10 の4本だけを書く。
+`04-native.md` に無いものを足さない。迷ったら足さない。
 
-### APP-01: 送信間隔の初期値 = 5分
+---
 
-サーバから `nextConfig` が届くまでの既定値。5分を選ぶのは、バッファ上限の288件が
-「5分間隔で24時間相当」として決まっており（APP-02）、初期値を5分に置くと
-最も負荷の高い条件が既定になるため。設置直後の動作確認でも5分待てば送信の成否が分かる。
+## 1. 技術選定
 
-### APP-03: 画像仕様
-
-| 項目 | 値 |
+| 項目 | 選定 |
 | --- | --- |
-| フォーマット | JPEG（`api.yml` の `encoding` が `image/jpeg` を指定） |
-| 本画像 | 長辺 1600px / 品質 80 |
-| サムネイル | 長辺 160px / 品質 70（長辺160px は `04-native.md` §1.5 で確定済み） |
-| 合計サイズ上限 | 4,500,000 バイト（`api.yml`。超過は 400 でリトライ不能） |
+| 言語 / UI | Kotlin + Jetpack Compose |
+| アーキテクチャ | 緩い Clean Architecture（`domain` / `usecase` / `infrastructure` / `presentation`） |
+| DI | **Hilt（KSP）。Module は最外装の `di/` にのみ置く** |
+| カメラ | **CameraX** + `LifecycleService` |
+| QR | **ML Kit `barcode-scanning`（bundled モデル）** を CameraX `ImageAnalysis` 経由で |
+| HTTP | **Retrofit + OkHttp + kotlinx.serialization** |
+| ローカル DB | Room（メタデータのみ）+ アプリ専用ストレージのファイル（画像） |
+| 資格情報 | `EncryptedSharedPreferences` |
+| 位置情報 | `FusedLocationProviderClient.lastLocation` |
+| 非同期 | Coroutines + Flow |
+| ULID | **自前実装**（採番時刻を引数で受け取れる必要があるため。§5.2） |
+| `minSdk` / `compileSdk` / `targetSdk` | 26 / 36 / 36（プレビュー SDK は使わない） |
+| `applicationId` | `com.edgewatcher` |
+| 画面の向き | 縦固定 |
 
-1枚あたり本画像 250〜450KB を見込む。288件で1端末1日あたり 100MB 前後、
-prod の保持7日で 700MB 程度。上限 4.5MB に対して10倍以上の余裕があり、
-端末差で膨らんでも 400 を踏まない。
+`APP-04` の未確定項目（カメラ API・位置情報の取得方式・テスト方針）は
+§1.1・上表・§10 で確定する。
 
-**サイズガード**: 符号化後の合計バイト数を実測し、4,500,000 を超えていたら
-品質 80 → 65 → 50 の順に再符号化する。それでも超える場合は長辺を 1280px に落として
-品質 50 で符号化する。送っても必ず 400 になるフレームをバッファに積まないため。
+### 1.1 CameraX を選ぶ理由
 
-### APP-04: 実装レベルの選定
+`04-native.md` §3.2 は「カメラの所有権は Foreground Service が持ち、画面はプレビュー用の
+Surface を渡す」と定める。CameraX の `Preview` use case が受け取る `SurfaceProvider` は
+まさにこの接点そのものであり、設計がそのまま写像できる。
 
-| 領域 | 選定 | 理由 |
-| --- | --- | --- |
-| カメラ | CameraX | 対応端末の幅（API 26 〜 Android 16）に対し、端末差を自前で踏み抜くコストが Camera2 の制御自由度を上回る。要件に低レベル制御を必要とする箇所が無い |
-| QR 読み取り | ML Kit `barcode-scanning`（bundled）を CameraX `ImageAnalysis` 経由 | bundled 版は Play 開発者サービスに依存せず動く。格安端末を前提にする以上ここは外せない |
-| 位置情報 | `FusedLocationProviderClient.lastLocation` | `getCurrentLocation` は測位を待つため `04-native.md` §1.5 の「測位を待たない」に反する |
-| HTTP | OkHttp + kotlinx.serialization（Retrofit は使わない） | 端末が叩くのは4本のみ。multipart のパート名と Content-Type は契約が縛る箇所であり、直接書く方が `api.yml` と1対1に対応する。テストは MockWebServer |
-| 永続化 | Room（メタデータ）+ アプリ専用ストレージのファイル（画像） | `04-native.md` §3.3 の決定 |
-| 資格情報 | `EncryptedSharedPreferences` | `04-native.md` §2.5 の決定 |
-| UI | Jetpack Compose | 画面が2つ。状態から表示への写像をテストしやすい |
-| DI | 手書きの `AppContainer`（Hilt は使わない） | 全てコンストラクタ注入にすればテストに必要なものは揃う。Service への注入のためだけに DI フレームワークと KSP のビルド時間を足す理由がない |
-| 非同期 | Coroutines + Flow | |
-| テスト | JVM 単体テスト + Robolectric。計装テストは書かない | §14 |
+- `ImageCapture` を常時 bind したまま `Preview` だけを bind / unbind すればプレビューの
+  トグルになる。定期撮影は同じ `ProcessCameraProvider` から行われるため、
+  「プレビューを開いている間だけ観測に穴が開く」という挙動にならない
+- **`Preview` + `ImageCapture` は、CameraX が LEGACY ハードウェアレベルの端末でも
+  サポートを保証している組み合わせである。** 余剰端末・格安端末を活用するコンセプト上、
+  これは決定的に重要
 
-## 3. プロジェクト構成
+Camera2 を直接使うと、プレビューのトグルのたびに `CaptureSession` の再構成が必要になり、
+API 26 から Android 16 までの端末差分を自分で背負うことになる。要件に低レベル制御を
+必要とする箇所は無い。
 
-リポジトリ直下に `android/` を新設する（`backend/` `web/` `infra/` と同じ並び）。
+### 1.2 `lastLocation` を使う理由
+
+`getCurrentLocation` は測位を待つ。`04-native.md` §1.5 は「測位を待たない。最後の既知位置で
+十分であり、定点観測デバイスは動かない」と定めているため、`lastLocation` を使う。
+取得できなければ `null` のまま送る。位置は必須項目ではない。
+
+---
+
+## 2. レイヤ構成
 
 ```
 android/
   settings.gradle.kts
-  build.gradle.kts
-  gradle/libs.versions.toml     バージョンカタログ
-  domain/                       kotlin("jvm")。Android SDK はクラスパスに無い
-  app/                          com.android.application
+  gradle/libs.versions.toml
+  app/
+    build.gradle.kts
+    src/main/AndroidManifest.xml
+    src/main/java/com/edgewatcher/
+      EdgeWatcherApp.kt              @HiltAndroidApp
+      di/                            Hilt Module はここだけに置く
+      domain/                        純 Kotlin。android.* を import しない
+        model/    DeviceCredentials  Session  PendingObservation
+                  ObservationState   IntervalMinutes  StatusLine
+        error/    ApiFailure
+        port/     CredentialStore  ObservationBuffer  ObservationApi
+                  CameraGateway    LocationGateway    JpegEncoder
+                  AlarmScheduler   Clock             IdGenerator
+      usecase/                       純 Kotlin。domain/port にだけ依存
+        PairDeviceUseCase          RefreshSessionUseCase
+        CaptureObservationUseCase  UploadNextObservationUseCase
+        LogoutDeviceUseCase
+      infrastructure/
+        api/      EdgeWatcherService（Retrofit）  dto/  AuthInterceptor  ErrorMapper
+        store/    EncryptedCredentialStore
+        db/       ObservationEntity  ObservationDao  RoomObservationBuffer  ImageFileStore
+        camera/   CameraXGateway     AndroidJpegEncoder
+        location/ FusedLocationGateway
+        service/  ObservationService（LifecycleService）
+                  AndroidAlarmScheduler  BootReceiver  Notifications
+      presentation/
+        MainActivity
+        permission/ PermissionScreen
+        pairing/    PairingScreen     PairingViewModel
+        running/    RunningScreen     RunningViewModel
+    src/test/java/com/edgewatcher/    JVM ユニットテスト（§10）
 ```
 
-`:domain` を Android ライブラリではなく純粋な JVM モジュールにするのは、
-Android SDK がクラスパスに存在しないことで、「うっかり `Context` を握って
-テストが重くなる」という劣化がコンパイルエラーとして即座に止まるため。
-構造で守れるものを規律で守らない。
+### 2.1 唯一の構造上の規約
 
-### ビルド設定
+**`domain` と `usecase` は `android.*` および Android ライブラリを import しない。**
+
+これが守られている限り §10 の4本のテストは JVM 上で即座に回り、エミュレータを必要としない。
+逆に、この規約を破らないと書けないロジックが現れたら、それは `infrastructure` に属する。
+
+`ApiFailure` の分類、eviction、送信順序、ULID の採番、画像方針とサイズガード、
+状態行の文言はすべて純粋な計算であり、この規約の下に置ける。
+
+`JpegEncoder` をポートとして切ったのは、**「どう符号化するか」の判断と画素の操作を
+分けるため**である。長辺・品質・サイズガードの段階（§5.3）は方針であって画像処理ではないので
+`domain` が持ち、`infrastructure` は言われた寸法で符号化するだけにする。
+
+### 2.2 画面 ↔ Service の接続: Bound Service
+
+`RunningScreen` は `bindService` で `ObservationService` に接続し、`Binder` 経由で
+
+- `StateFlow<ObservationState>` を購読する（状態表示）
+- プレビュー ON のときだけ `Preview.SurfaceProvider` を渡し、OFF で外す
+
+unbind によって参照が自動的に切れるため、Compose が破棄した Surface を Service が
+掴み続ける事態が構造的に起こらない。アプリスコープのシングルトンに Surface を預ける方式では、
+解放の書き忘れ一つで「プレビューを閉じたのにカメラが掴まれたまま発熱し続ける」という、
+屋外設置で最も発見しにくい壊れ方をする。カメラは同時に2つのクライアントが開けない資源なので、
+寿命が対で管理される仕組みを当てる。
+
+Service の生存自体は `startForegroundService` が担う。bind はあくまで画面が繋がっている
+間だけの付加であり、**画面を閉じても観測は止まらない。**
+
+### 2.3 アップロードキューは Service 内のコルーチンが駆動する
+
+`WorkManager` の `OneTimeWorkRequest` を使えば指数バックオフ・ネットワーク制約・
+プロセス死をまたぐ永続化が無料で手に入る（`04-native.md` §3.1 が WorkManager を退けたのは
+`PeriodicWork` の15分下限が理由であり、単発の送信には当てはまらない）。
+
+それでも採らない。FGS はどのみちウェイクロックを保持して常駐しており、プロセス死からの
+復帰は `AlarmManager` と `START_STICKY` で既に確保されているため、WorkManager の利点は
+二重投資になる。一方で `04-native.md` §3.5 が要求する「最新の1枚を先に、以後古い順」という
+優先順位を WorkManager のスケジューラに守らせるのは面倒であり、
+バッファの真実の源が Room と WorkManager のキューに二重化する。
+
+---
+
+## 3. 確定した未決事項
+
+### 3.1 APP-01: 送信間隔の初期値 = **5分**
+
+送信間隔は Web が決め、端末はアップロード応答の `nextConfig` から受け取る。
+しかし**ペアリング直後から最初のアップロード成功までの間、端末は間隔を知る手段を持たない**
+（端末向けの設定取得エンドポイントは存在しない）。したがって端末側にブートストラップ値が要る。
+
+**この値は backend の `createDevice` が使う既定値と一致していなければならない。**
+ずれると最初の1サイクルだけ端末の実際の動作と Web の表示が食い違う。
+現在の backend の既定値は `internal/webapi/webapi.go` の
+`defaultInterval = api.IntervalOptions[0]`、すなわち **5分**である。
+
+実装時、この定数の隣に「backend の `defaultInterval` と同一であること」というコメントを
+残すこと。片方だけが変更されても機械的には検出できない。
+
+### 3.2 APP-03: 画像仕様
 
 | 項目 | 値 |
 | --- | --- |
-| `applicationId` | `com.edgewatcher` |
-| `minSdk` | 26 |
-| `targetSdk` / `compileSdk` | 36（Android 16）。安定版の最新であり、動作確認に使う実機と一致する。ローカル SDK に `android-36` が無ければ `sdkmanager` で追加する。プレビュー SDK は使わない |
-| 画面の向き | 縦固定 |
-| `versionName` / `versionCode` | `1.0.0` / `1` |
+| フォーマット | JPEG（`api.yml` の `encoding` が `image/jpeg` を指定） |
+| 本画像 | **長辺 1600px / 品質 80** |
+| サムネイル | **長辺 480px / 品質 75** |
+| 合計サイズ上限 | 4,500,000 バイト（超過は 400。リトライ不能） |
+| EXIF | 落とす |
 
-### フレーバー
+本画像は実効 250〜450KB を見込む。上限 4.5MB に対して一桁の余裕があり、
+**上限が routine な制約ではなく安全網として機能する**状態を保てる。
+288件のバッファはおよそ 100MB 前後になり、500MiB より件数の上限が先に効く。
+これは「5分間隔で24時間分を保持する」という `APP-02` の意図どおりの動作である。
 
-次元 `backend` に `mock` と `live` の2フレーバーを置く。
+**サムネイルは `04-native.md` の暫定値 160px から 480px に引き上げる。**
+Web のダッシュボードは端末カードの画像に `latestThumbnailUrl`（端末が送るこのサムネイル）を
+使っており（`03-web.md` §1.5）、カード幅は通常 280〜360px あるため 160px では明確にぼやける。
+480px なら履歴のコマ列（表示は 80〜120px）にもダッシュボードのカードにも耐える。
+1枚 30〜50KB で、288件でも1端末1日あたり十数 MB にしかならない。
 
-| フレーバー | `EdgeWatcherApi` の実装 | 備考 |
+### 3.3 APP-04
+
+§1 の表で確定。カメラは CameraX、位置情報は `lastLocation`、テスト方針は §10。
+
+---
+
+## 4. ペアリング
+
+### 4.1 フロー
+
+1. CameraX `Preview` + `ImageAnalysis` に ML Kit を挿し、QR を読む
+2. **ペイロードが `ew1:` で始まらなければ黙って無視し、読み取りを続ける。**
+   他のアプリの QR に反応しないため。エラー表示も出さない
+3. `ew1:` を除いた残りを `pairingCode` として `POST /device/pair` に送る
+4. 応答の `deviceSecret` を `EncryptedSharedPreferences` に保存する
+5. `POST /device/token` で `sessionToken` と `expiresAt` を取得し、同じく保存する
+6. `startForegroundService` で `ObservationService` を開始する
+7. バッテリー最適化の除外と `SCHEDULE_EXACT_ALARM` を1度だけ案内する（§4.4）
+
+`deviceInfo` には `model` / `osVersion` / `appVersion` を入れる。表示専用であり、
+何の認可判断にも使われない。
+
+### 4.2 失敗の読み分け
+
+`api.yml` の定めるとおりに実装する。**丸めてはならない。**
+
+| status | code | 挙動 |
 | --- | --- | --- |
-| `mock` | アプリ内の偽バックエンド。ネットワークに一切出ない | `applicationIdSuffix = ".mock"` を付け、live 版と同じ端末に共存できるようにする |
-| `live` | OkHttp 実装 | `EW_API_BASE_URL` をビルド時に受け取る |
+| 404 | `PAIRING_NOT_FOUND` | **1秒間隔でリトライ。初回1回 + リトライ3回 = 最大4リクエスト** |
+| 409 | `PAIRING_CODE_CONSUMED` | 即座に「この QR は使えません」 |
+| 409 | `PAIRING_CODE_EXPIRED` | 即座に「この QR の有効期限が切れています」 |
+| 400 | `VALIDATION_ERROR` | 即座に失敗。リトライしない |
 
-`EW_API_BASE_URL` は環境変数、または Gradle プロパティ `ewApiBaseUrl` から読む。
-**`live` フレーバーでこれが未設定ならビルドを失敗させる。** 空の URL を焼いた APK が
-作れてしまうと、何も送っていないアプリを実物と誤認する事故が起きるため。
+404 だけがリトライ対象なのは、`pairingCode` の逆引きが結果整合な GSI2 を通るためである。
+409 を 404 に丸めると絶対に成功しない QR を回し続け、404 を 409 に丸めると
+成功するはずのペアリングを諦める。
 
-切り替えの軸を「モックか実物か = フレーバー（コンパイル時に固定）」と
-「どの AWS か = 環境変数（ビルド時に注入）」に分けている。AWS 環境は変わりうるが
-API 契約は変わらない、という前提に対応する。モックの実装が live ビルドに
-コンパイルされないことが、ソースセットの分離によって構造的に保証される。
+### 4.3 端末名は画面にも通知にも出さない
 
-`release` ビルドでは平文通信を一切許可しない（`networkSecurityConfig`）。
-`mock` はネットワークに出ないため平文の設定自体が不要である。
+**`POST /device/pair` の応答は `deviceId` と `deviceSecret` だけであり、端末名を含まない。**
+他に端末名が届く経路も無いため、**端末はそもそも自分の名前を知らない。**
 
-### mock フレーバーの偽バックエンド
+`docs/mocks/native-mocks.html` は `paired` シナリオの見出しと常駐通知2種で端末名を
+表示しているが、これは実装不能である。モック側を修正する（§12）。
 
-`api.yml` の端末群4本を模す。ペアリングは Web アプリをモックモードで動かして
-QR を出し、それを実機で読む（`web/src/services/mock-server.ts` が `ew1:PAIR_XXXXXXXXXX`
-形式のコードを発行する）。
+### 4.4 権限とシステム設定の案内
 
-偽バックエンドは**常に成功を返す**。確率的な失敗は入れない。再現しない失敗は
-デバッグの役に立たないためである。オフライン時の挙動（バッファ滞留、指数バックオフ、
-上限退避）は `live` フレーバーで実機を機内モードにして確認する。
+権限は QR スキャナに入る前に通す。`CAMERA` と `ACCESS_FINE_LOCATION` のどちらかが
+恒久的に拒否された場合は、設定を開く導線だけを出す。**縮退モードは持たない。**
+カメラか位置情報のどちらかが欠けた時点でこのアプリの目的が成立しないため。
 
-## 4. 境界（ポート一覧）
+**`ACCESS_BACKGROUND_LOCATION` は要求しない**（`04-native.md` §1.3）。
+FGS の `location` タイプが「使用中」を成立させるため不要であり、要求すると Play の審査で
+背景位置情報の正当化が必要になる。
 
-`:domain` はインターフェースを定義し、`:app` が実物を実装する。
-この一覧がそのまま、テストで差し替える対象の一覧でもある。
+権限とは別枠で、ペアリング完了直後に次の2つを1度だけ案内する。どちらも強制はせず、
+稼働画面から再度開けるようにする。
 
-| ポート | 責務 | `:app` 側の実装 |
-| --- | --- | --- |
-| `EdgeWatcherApi` | 端末群4本の呼び出し。結果は封じた型で返し、HTTP ステータスを呼び出し側に漏らさない | OkHttp（live）/ 偽バックエンド（mock） |
-| `CredentialStore` | `deviceId` / `deviceSecret` / `sessionToken` / `sessionExpiresAt` の読み書きと全消去 | `EncryptedSharedPreferences` |
-| `ObservationStore` | 観測メタデータと画像ファイルの登録・列挙・削除・総バイト数 | Room + アプリ専用ストレージ |
-| `CaptureSource` | 1枚撮る。プレビュー用 Surface の付け外し | CameraX |
-| `JpegEncoder` | 指定された長辺と品質で JPEG に符号化する | `Bitmap` / `BitmapFactory` |
-| `LocationSource` | 最後の既知位置（測位は待たない。取得できなければ null） | `FusedLocationProviderClient` |
-| `AlarmScheduler` | 次回撮影時刻に起こす / 取り消す | `AlarmManager` |
-| `Clock` | 現在時刻 | システム時刻 |
-| `IdGenerator` | 指定時刻をタイムスタンプ部に持つ ULID の採番 | 実装は `:domain` 内で完結してよい |
+- **バッテリー最適化の除外** — メーカー独自の省電力機構が FGS を止める主要因
+- **`SCHEDULE_EXACT_ALARM`**（Android 12+）— 無いと `setExactAndAllowWhileIdle` が使えず、
+  §5.1 のタイマーが成立しない
 
-`JpegEncoder` をポートとして切ったのは、画素の操作と「どう符号化するか」の判断を
-分けるため。長辺・品質・サイズガードの段階は方針であって画像処理ではないので
-`:domain` の `ImagePolicy` が持ち、`:app` は言われた寸法で符号化するだけにする。
+---
 
-`:domain` が持つロジック: `PairingService` / `SessionManager` / `CaptureCoordinator` /
-`UploadQueue` / `BufferPolicy` / `ObservationEngine` / `ImagePolicy` / `StatusLine`。
+## 5. 観測パイプライン
 
-## 5. 状態モデル
+### 5.1 タイマー
 
-画面・常駐通知・サービスが同じ1つの型を見る。`04-native.md` §1.7 が
-「画面と通知の両方に同じ情報を1行で出す」と要求している以上、表示の一致を
-実装の規律ではなく型で担保する。以下、本書における `§n` は本書の節を指し、
-要件側を参照する場合は必ず `04-native.md §n` と書く。
+`04-native.md` §3.0 のとおり、ウェイクロックと `AlarmManager` を二重化する。
 
-```kotlin
-sealed interface AppState {
-    data class Unpaired(val reason: UnpairReason?) : AppState
-    data class Paired(val run: RunState) : AppState
-}
-
-sealed interface RunState {
-    data class Observing(val lastUploadAt: Instant?) : RunState
-    data class Offline(val pending: Int, val lastUploadAt: Instant?) : RunState
-    data object Stopped : RunState
-}
-
-enum class UnpairReason { DISCONNECTED_BY_SERVER, LOGGED_OUT }
-```
-
-モックの3状態（`ok` / `warn` / `off`）と1対1に対応する。
-`Stopped` のときだけ `[観測を再開]` を出すという `04-native.md` §1.7 の分岐は、
-この型の分岐そのものになる。
-
-`Offline` の定義: **未送信が1件以上あり、かつ直近の送信試行が失敗している**。
-
-## 6. ペアリング
-
-QR ペイロード `ew1:<pairingCode>` から `ew1:` を剥がした残りを、そのまま
-`pairingCode` として送る。**端末はコードの形式を検証しない。** 形式の妥当性は
-サーバが決めることであり、端末が「52文字 base32」を強制すると
-モックモードの Web が発行するコードと噛み合わなくなる。
-
-`deviceInfo` には `Build.MODEL` / `Build.VERSION.RELEASE` / `BuildConfig.VERSION_NAME` を入れる。
-
-### 失敗の読み分け
-
-| 結果 | 挙動 |
+| 仕組み | 役割 |
 | --- | --- |
-| 404 `PAIRING_NOT_FOUND` | 1秒空けて再送。**初回1回 + リトライ3回 = 最大4リクエスト** |
-| 409 `PAIRING_CODE_CONSUMED` / `PAIRING_CODE_EXPIRED` | 即座に「この QR コードは使えません」 |
-| 400 `VALIDATION_ERROR` | リトライしない |
-| ネットワーク到達不能 | **404 と混ぜない。**「サーバーに接続できません」として再スキャンを促す |
+| `PARTIAL_WAKE_LOCK` | Service 稼働中は保持し続け、CPU のサスペンドを止める |
+| `AlarmManager.setExactAndAllowWhileIdle` | 次回撮影時刻に必ず起こす。プロセス再生成後の復帰点にもなる |
 
-「最大3回リトライ」（`04-native.md` §1.4 / `api.yml`）を、初回を含めた最大4リクエストと
-解釈する。曖昧なまま実装すると挙動が2通りに割れるため、ここで数字として固定する。
+**`Handler.postDelayed` やコルーチンの `delay` を撮影周期の駆動に使ってはならない。**
+画面 OFF でサスペンドに入ると発火しないか大幅に遅延する。FGS は「殺されにくい」ことを
+保証するだけで「動き続ける」ことを保証しない。
 
-到達不能を 404 と同じ経路に入れないのは、圏外の端末が「この QR は使えません」と
-表示してしまい、オーナーが QR を再発行しても直らないという誤誘導になるため。
+アラームは**撮影のたびに次回分を再設定する**（繰り返しアラームを使わない）。
+`nextConfig` による間隔変更が次のサイクルから自然に反映されるため。
 
-### 資格情報の保存
+Doze は考慮しない。Doze の条件は「画面 OFF + 静止 + **バッテリー駆動**」であり、
+常時給電の本プロジェクトでは成立しない。
 
-`deviceId` と `deviceSecret` を `EncryptedSharedPreferences` に書き込み、
-**書けたことを確認してから** `POST /device/token` に進む。`deviceSecret` が平文で
-流れるのはこの1度だけであり、保存に失敗したまま先へ進むと、その端末は
-Web から QR を再発行するまで永久に復帰できない。
-
-### カメラの持ち主の切り替え
-
-未ペアリング時はサービスが動いていないため、スキャナ画面がカメラを持つ。
-
-- ペアリング成立 → **スキャナを閉じてから** Foreground Service を起動する
-- 切断・ログアウト → **サービスを止めてから** スキャナを開く
-
-Android のカメラは同時に2つのクライアントが開けないため、この順序は守る必要がある。
-
-## 7. セッションと自己修復
-
-送信前に `sessionExpiresAt` を確認し、過ぎていれば先に `POST /device/token` を呼ぶ。
-ただしこれは往復を減らす最適化にすぎず、正しさの根拠にはしない。端末の時計はずれるため、
-期限判定が外れた場合は下の 401/403 経路が必ず拾う。
-
-`api.yml` 冒頭が明記するとおり、**端末が実際に受け取るのは 403 である。**
-オーソライザが `isAuthorized:false` を返すと API Gateway が 403 に変換する。
-`04-native.md` §1.9 が「401」と書いているのはネットワーク上の事実と食い違う。
-401（ヘッダ欠落）と 403（拒否）の両方を同じ入口にする。
+### 5.2 撮影1周期
 
 ```
-/device/uploads または /device/logout が 401 または 403
-  └→ POST /device/token
-       200                  → 新しい sessionToken で再送。以後継続
-       401                  → 資格情報を全消去 → サービス停止
-                              → Unpaired(DISCONNECTED_BY_SERVER) へ
-       5xx / ネットワーク断 → 修復ではない。バックオフして待つ。フレームは捨てない
+① capturedAt = Clock.now()
+② observationId = IdGenerator.ulid(capturedAt)   ← 採番時刻を引数で受ける
+③ CameraGateway.capture()
+④ ImagePolicy に従って符号化（§5.3）
+⑤ LocationGateway.lastKnown()   ← 測位を待たない。null 可
+⑥ 画像2枚をファイルへ、メタデータ1行を Room へ（state = PENDING）
+⑦ eviction（§6）
+⑧ 次回アラームを再設定
 ```
 
-最後の行が本節でもっとも重要である。`POST /device/token` の 5xx や圏外を
-「切断された」と解釈すると、電波が悪いだけの端末が `deviceSecret` を捨ててしまい、
-屋外の設置場所まで行って QR を読み直す以外に復旧手段がなくなる。
-**資格情報を消すのは 401 が返ってきたときだけとする。**
+**`observationId` の採番時刻は `capturedAt` と厳密に一致させる。**
+サーバは日別クエリの範囲を ULID のタイムスタンプ部から導くため、ここがずれると
+観測が別の日に並ぶ。`IdGenerator.ulid()` を引数なしで呼べる形にしてはならない。
+既存の ULID ライブラリの多くは採番時刻を外から渡せないため、自前で実装する。
 
-未ペアリング画面に戻る際は理由を残す（`AppState.Unpaired(reason)`）。
-「この端末は接続を解除されました。再度ペアリングしてください。」
-黙って QR スキャナに戻すと、オーナーには端末の故障と区別がつかない。
+**`metadata` に `deviceId` を入れない。** 入れてもサーバは読まない。
+端末の同一性はオーソライザだけが決める。
 
-## 8. 観測パイプライン
+### 5.3 符号化とサイズガード
 
-### 8.1 タイマー
-
-サービス稼働中は `PARTIAL_WAKE_LOCK` を保持し続け、それとは別に
-`AlarmManager.setExactAndAllowWhileIdle` で**次の1回だけ**を予約する。
-
-周期アラームにしないのは、`nextConfig` で間隔が変わりうるため。撮影のたびに
-次回を決め直す形にすると、「設定変更は最大1送信サイクル遅れて反映される」という
-`04-native.md` §1.5 の定義が実装上そのまま自明になる。
-
-次回時刻は**撮影周期の完了時点から interval 後**に置く。定点観測に厳密な等間隔の
-意味はなく、ドリフトを補正しようとすると撮影が詰まったときに連射になる。
-
-`canScheduleExactAlarms()` が false の場合は設定画面へ誘導する（§11）。
-**未許可のままでも `setAndAllowWhileIdle` にフォールバックして動き続ける。**
-不正確になるが、止まるよりはるかにましである。
-
-### 8.2 カメラの所有権
-
-サービスが `LifecycleRegistry` を持ち、状態によってバインドを切り替える。
-
-| 状況 | バインド | 撮影 |
-| --- | --- | --- |
-| 通常（プレビュー OFF） | 何もバインドしない = カメラは閉じている | 発火のたびに `ImageCapture` をバインド → 撮影 → `unbindAll()` |
-| プレビュー ON | `Preview` + `ImageCapture` を維持 = カメラは開いたまま | バインドし直さず、**同じセッションから撮る** |
-
-これが `04-native.md` §2.2（発熱を避けるため常時は開かない）と §3.2（プレビュー中も
-同じセッションから撮り、送信に穴を開けない）を同時に満たす形である。
-CameraX は `bindToLifecycle` した時点でカメラを開くため、`ImageCapture` を
-常時バインドしたままにすると §2.2 に反する。
-
-画面はサービスにバインドして `PreviewView` の `SurfaceProvider` を渡すだけで、
-カメラ本体には触らない。
-
-### 8.3 撮影1周期
+本画像を長辺1600px・品質80、サムネイルを長辺480px・品質75で符号化する。
+**符号化後の合計バイト数を実測し、4,500,000 を超えていたら段階的に落とす。**
 
 ```
-アラーム発火（wakelock は保持済み）
-  → 撮影（§8.2 の規則）
-  → 本画像 長辺1600px/品質80、サムネイル 長辺160px/品質70 を生成
-  → 合計バイト数を検査し、4,500,000 超なら本書 §2 のサイズガードを適用
-  → observationId = ULID（タイムスタンプ部は capturedAt に一致させる）
-  → 最後の既知位置を付与（測位は待たない。取れなければ lat/lng を省く）
-  → 画像をアプリ専用ストレージへ、メタデータを Room へ（未送信として）
-  → バッファ上限を判定し、超過分を古い順に削除（§9）
-  → 送信キューを起こす（§10）
+品質 80 → 65 → 50 の順に本画像を再符号化する
+それでも超える場合は、本画像を長辺 1280px・品質 50 で符号化する
 ```
 
-ULID のタイムスタンプを `capturedAt` に合わせるのは装飾ではない。`api.yml` が
-「サーバは日別クエリの範囲を ULID のタイムスタンプ部から導く」と書いており、
-ずれると観測が Web 上で別の日に並ぶ。
+送っても必ず 400 になるフレームをバッファに積まないため。この判断は `domain` の
+`ImagePolicy` が持ち、`infrastructure` の `JpegEncoder` は言われた寸法で符号化するだけにする。
 
-`capturedAt` は ISO 8601（RFC 3339）で送る。パースできなければ 400 になる。
+---
 
-## 9. バッファ
+## 6. バッファ
 
-Room の1行が持つのは `observationId`（主キー）/ `capturedAt` / `imagePath` /
-`thumbPath` / `lat` / `lng` / `sizeBytes` / 送信状態 / 試行回数 / 次回試行時刻 のみ。
-画像本体はアプリ専用ストレージのファイルに置く（`04-native.md` §3.3）。
+**288件 または 524,288,000 バイト（500MiB）のいずれか先に達したら、古いものから削除する**
+（`APP-02`）。
 
-退避は**新しい1件を登録した後**に判定し、次のいずれかが成立する間、
-最古から削除する（Room の行とファイルを同時に消す）。
+判定は撮影のたびに行う。件数と総バイト数の両方を評価し、どちらかを超えていれば
+`capturedAt` の古い順に、両方の条件を満たすまで削除する。
+削除は Room の行と画像ファイル2枚を**対で**行い、片方だけが残らないようにする。
 
-- 件数が 288 を超える
-- 合計バイト数が 524,288,000 バイト（500MiB）を超える
+画像本体をファイルに置き Room にメタデータだけを持つのは、BLOB を SQLite に入れると
+DB ファイルが肥大し、削除しても領域が戻りにくいためである（`04-native.md` §3.3）。
+バッファは常に書いては消すことを繰り返すため、この性質が効いてくる。
 
-削除が発生した回は、モックの `buffer-full` に対応するバナーを画面に出す。
+バッファ上限を保持期間より長くしても意味がない。観測レコードの TTL は `capturedAt` を
+基準に決まるため、長時間オフラインだった端末が古い画像を送っても、
+サーバ到着時点で期限切れになりうる。
 
-## 10. 送信キュー
+---
 
-送信対象は毎回この規則で選ぶ。
+## 7. 送信キュー
 
-1. 未送信の中で最も新しい行が**まだ一度も送信を試みていない**なら、それを選ぶ
-2. そうでなければ、未送信の中で最も古い行を選ぶ
+### 7.1 取り出し順
 
-結果として「最新の1枚を先に送り、そのあと残りを古い順に送る」になる。
-新しい撮影が入るたびに規則1が再び成立するため、長時間オフラインから復帰した
-ときだけを特別扱いする分岐は要らない。通常時は未送信が1件しかないので同じ動きになる。
+`04-native.md` §3.5 に従う。**最新の未送信1枚を先に送り、そのあと古い順。**
 
-これは `04-native.md` §3.5 の要求（復旧時に最新の1枚を先に送る）を満たす。
-遅れて届いた古い画像が `Device.latestThumbnailKey` を巻き戻さないための条件付き更新は
-サーバ側が行う（`engineering/dynamodb.md` §5.1）。
+長時間オフラインから復帰したとき単純な FIFO で送ると、Web のダッシュボードに
+何時間も前の画像が出続ける。オーナーが最初に知りたいのは「今どうなっているか」である。
+
+### 7.2 リクエスト
+
+`POST /device/uploads`、multipart。パート名は **`image` / `thumbnail` / `metadata`**。
+`metadata` は `application/json` で `observationId` と `capturedAt`（RFC 3339）が必須、
+`lat` / `lng` は取得できていれば入れる。
+
+`Authorization` ヘッダは **`Bearer` を付けない素のトークン**を送る。
+
+送信前に `Session.expiresAt` を見て、残り5分未満なら先に `POST /device/token` で更新する。
+12時間ごとに1往復が無駄になるのを避けるためであり、必須ではないが安い。
+
+### 7.3 応答の扱い
 
 | 応答 | 扱い |
 | --- | --- |
-| 200 | ファイルと行を削除。`nextConfig.intervalMinutes` を保存し、次回アラームから適用 |
-| 400 | **フレームを破棄。**リトライしても永久に通らない |
-| 413 | **フレームを破棄。**同上 |
-| 401 / 403 | §7 のセッション修復へ。**フレームは残す** |
-| 5xx / ネットワーク断 | 指数バックオフ。**フレームは残す** |
+| 200 | Room の行と画像ファイルを削除。`nextConfig.intervalMinutes` を保存し次回アラームへ反映 |
+| 400 | **捨てる。** 本文に起因する失敗であり、再送しても永久に通らない |
+| 413 | **捨てる。** API Gateway のペイロード上限超過。本文は `Error` スキーマではない |
+| 401 / 403 | セッション再取得へ（§8） |
+| 5xx / 通信断 | 指数バックオフで同じ行を再試行。連続失敗回数 n に対し `min(5 * 2^(n-1), 300)` 秒 |
 
-バックオフは、その行の**連続失敗回数を n** として、次回試行までの待ち時間を
-`min(5 * 2^(n-1), 300)` 秒とする（1回目の失敗後は5秒、以降 10, 20, 40, 80, 160, 300…）。
-送信に成功した行は削除されるため、n が持ち越されることはない。
-上限を300秒に置くのは、それ以上待っても次の撮影が来るだけだから。
-**リトライ中も定期撮影は止めない**（`04-native.md` §2.4）。
+**リトライ中も定期撮影は止めない。** 撮った画像はバッファに積まれ、上限に達するまで失われない。
 
-同じ `observationId` で再送しても記録は1件に保たれるため、200 を受け取れなかった
-場合の再送は安全である（`api.yml` の冪等性の節）。
+`nextConfig` は**必ず適用する**。サーバは設定を push しないため、送信間隔の変更が
+オーナーから端末へ届く経路はこれ1本しかない。結果として設定変更は最大1送信サイクル遅れる。
 
-リクエストは multipart/form-data で、パート名は `image` / `thumbnail` / `metadata`、
-Content-Type はそれぞれ `image/jpeg` / `image/jpeg` / `application/json`。
-`Authorization` ヘッダは **`Bearer` を付けない素のトークン**。
-`metadata` に `deviceId` は含めない（サーバは読まない）。
+---
 
-## 11. UI・権限・通知
+## 8. セッションと自己修復 — **401 と 403 の両方**を入口にする
 
-### 画面
+```
+アップロードが 401 または 403
+  └→ POST /device/token
+       ├ 200 → 新しい sessionToken で再送し、以後継続
+       ├ 401 → deviceSecret が無効（Web から切断されたか、端末が削除された）
+       │        資格情報とバッファを全消去 → Foreground Service を停止
+       │        未ペアリング画面へ戻り、理由を画面上に残す
+       └ 5xx / 通信断 → 何も消さない。バックオフして後で再試行する
+```
 
-初回起動時、未ペアリング画面に入る前に権限ゲートを通す。
+### 8.1 `04-native.md` §1.9 の記述は、実装すると壊れる
 
-| 権限 | 備考 |
-| --- | --- |
-| `CAMERA` | 必須 |
-| `ACCESS_FINE_LOCATION` | 必須 |
-| `POST_NOTIFICATIONS` | Android 13+ |
-| `FOREGROUND_SERVICE_CAMERA` / `_LOCATION` | マニフェスト宣言のみ。実行時要求は不要 |
+`04-native.md` §1.9 は「401 を起点とした自己修復」と題し、401 を唯一の入口としている。
+**これをそのまま実装すると、セッション失効から永久に回復できない。**
 
-`ACCESS_BACKGROUND_LOCATION` は要求しない。恒久的に拒否された場合は
-「設定を開く」導線だけを出し、**権限なしで動作する縮退モードは持たない**。
+`api.yml` の `deviceSession` の定義により、端末ルートでは:
 
-以降の画面は `AppState` の分岐そのままである。
+- **セッションが失効した / status が PAIRED でない / トークンのハッシュが不一致** →
+  Lambda オーソライザが拒否し、API Gateway が **403**（`{"message":"Forbidden"}`）を返す
+- **`Authorization` ヘッダそのものが無い** → オーソライザは呼ばれず **401**
+  （`{"message":"Unauthorized"}`）
 
-- `Unpaired` → 全画面 QR スキャナ。`reason` があれば理由バナーを重ねる
-- `Paired` → 状態1行 + `[画角を合わせる]`（`Stopped` のときだけ `[観測を再開]`）+ `[ログアウト]`
+日常運用で起きるのは前者、すなわち **403** である。したがって端末は
+**401 と 403 の両方**を `POST /device/token` へ流す。
 
-ボトムシートは5種（ペアリング中 / 無効な QR / 接続しました / バッテリー最適化の案内 /
-ログアウト確認）で、`native-mocks.html` の14シナリオを覆う。
+なお `POST /device/token` 自体の失敗はすべて 401 である（404 も 403 も返らない）。
+これは `06-auth.md` §5 が 401 を端末の自己修復の唯一の入口と定めているためで、
+この一点においては `04-native.md` §1.9 の記述と一致する。
 
-**端末名は表示しない。** `POST /device/pair` の応答は `{deviceId, deviceSecret}` だけで、
-端末名は端末に届かないため。完了画面は「接続しました」、通知は
-「観測中 ・ 最終送信 14:32 ・ 5分間隔」とする。`api.yml` を変更してまで表示する
-価値は無い。オーナーは目の前の端末をセットアップしている最中であり、
-どの端末かは分かっている。
+### 8.2 資格情報を消してよい条件
 
-### ペアリング直後の案内
+**`POST /device/token` が 401 を返したときだけ、資格情報を消してよい。**
 
-ペアリング完了直後に一度だけ、**バッテリー最適化の除外**と、
-必要なら**正確なアラームの許可**（`canScheduleExactAlarms()` が false のとき）を案内する。
-強制はせず、稼働画面から再度開けるようにする。メーカー独自の省電力機構が
-Foreground Service を停止させることが実際に多く、案内しないと
-「なぜか止まる」の主要因になる（`04-native.md` §1.3）。
+5xx・タイムアウト・ネットワーク断で消してはならない。**通信障害と切断を取り違えると、
+一時的に圏外になっただけの端末が資格情報を捨て、復帰には Web からの QR 再発行と
+現地への物理的な訪問が必要になる。** 屋外設置の端末でこれが起きると回復コストが跳ね上がる。
 
-### 通知
+### 8.3 未ペアリング画面へ戻すときは理由を残す
 
-常駐通知の本文は、画面の状態行と**同じ `:domain` の関数（`StatusLine`）から生成する**。
-`04-native.md` §1.7 が「画面と通知に同じ情報を出す」と要求している以上、一致を
-実装の注意深さに頼らず、1か所からの派生にする。
+> 「この端末は接続を解除されました。再度ペアリングしてください。」
 
-チャンネルは2つ。
+黙って QR スキャナに戻すと、オーナーには端末の故障と区別がつかない。
 
-| チャンネル | 重要度 | 用途 |
+### 8.4 エラー本文の形が2種類ある
+
+アプリケーション層のエラーは `{"error":{"code","message"}}` だが、
+**オーソライザと API Gateway が返す 401 / 403 / 413 は `{"message":"..."}` である。**
+
+パーサはこの2つを両方受け付け、**パースに失敗しても status だけで分類を決められること。**
+分類の判断を本文に依存させてはならない。
+
+### 8.5 ログアウト
+
+確認ダイアログを挟んでから `POST /device/logout`（本文なし、204）を呼び、
+ローカルの資格情報とバッファを破棄して未ペアリング画面へ戻る。
+
+Web と違って確認を挟むのは、端末は `deviceSecret` を失うため、復帰に Web からの
+QR 再発行と端末への物理的な操作が要るからである。取り返しのつきやすさが違う。
+
+**端末からの「削除」は提供しない。** 屋外に常設された端末が物理的に触られただけで
+オーナーの管理下からレコードごと消える事態を避ける。
+
+---
+
+## 9. UI・通知・再起動
+
+### 9.1 画面
+
+実質2画面。タブもナビゲーションドロワーも持たない。
+
+| 画面 | 表示条件 | 内容 |
 | --- | --- | --- |
-| 常駐 | `LOW`（無音） | Foreground Service の常駐通知 |
-| 復帰要求 | `HIGH` | 再起動後に観測が止まっていることの通知（§12） |
+| 未ペアリング | 資格情報を持たない | QR スキャナ（全画面） |
+| ペアリング済み | 資格情報を持つ | 状態1行、`[画角を合わせる]`、`[ログアウト]` |
 
-## 12. 再起動と復帰
+通常時は**画像を一切表示しない。** `[画角を合わせる]` を押したときだけライブプレビューに
+切り替わり、もう一度押すと戻る（トグル）。**直近に送信した画像のサムネイルも表示しない。**
+観測画像を見る場所は Web に一本化する。ライブプレビューだけが例外なのは、
+それが閲覧ではなく設置作業のための道具だからである。
 
-`BOOT_COMPLETED` を受けて `Build.VERSION.SDK_INT` で分岐する。
+**ライブプレビュー中も定期送信は止まらない。** 同じカメラセッションから撮影する（§2.2）。
+
+### 9.2 状態行
+
+画面と常駐通知に**同一の文字列**を1行で出す。文言の生成は `domain` の `StatusLine` が持つ。
+
+| 状態 | 条件 | 表示 |
+| --- | --- | --- |
+| 観測中 | 直近の送信に成功 | 「観測中 / 最終送信 14:32」 |
+| 送信待ち | 送信に失敗しバッファに滞留 | 「オフライン / 12件待機中」 |
+| 観測停止中 | サービスが動いていない | 「停止中」+ `[観測を再開]` |
+
+「オフライン」を明示するのは、画面を見ただけでは通信の成否が分からないためである。
+屋外設置後にオーナーが端末を見に行く動機のほとんどが「本当に送れているのか」の確認であり、
+その答えを最初に出す。
+
+`[観測を再開]` は**停止中のときだけ**出す。Android 14 以降は再起動後に自動復帰できず、
+この操作がないとアプリから観測を再開する手段がなくなる。
+
+端末名は表示しない（§4.3）。
+
+### 9.3 再起動
 
 | OS | 挙動 |
 | --- | --- |
-| Android 13 以下 | Foreground Service を直接開始する。オーナーの操作は不要 |
-| Android 14 以上 | **高優先度通知のみを出す。** タップで Activity を前面に出し、そこから Foreground Service を開始する |
+| Android 13 以下（SDK ≤ 33） | `BOOT_COMPLETED` を受けて FGS を自動的に開始する |
+| Android 14 以上（SDK ≥ 34） | 自動復帰は**できない**。高優先度通知を出し、タップで前面に出してから開始する |
 
-Android 14 以降はバックグラウンドから `camera` タイプの Foreground Service を
-開始できず、`BOOT_COMPLETED` の受信はバックグラウンド起動に当たるため、
-自動復帰は原理的に不可能である（`04-native.md` §3.4）。
+Android 14 以降、バックグラウンドから `camera` タイプの FGS を開始することは禁止されており、
+`BOOT_COMPLETED` の受信はバックグラウンド起動に当たる。型を `dataSync` に変えても解決しない。
+カメラは「使用中のみ」の権限であり、`camera` 型の FGS がその「使用中」を成立させているため。
 
-サービスは `START_STICKY` で再生成させる。ただし**再生成もバックグラウンド起動に
-当たるため、Android 14 以上では失敗しうる。** 失敗した場合は `04-native.md` §1.10 と
-同じ「`Stopped` + 復帰要求の通知」に落とす。`START_STICKY` が当てになるのは 13 以下である。
+通知文言:
+> 「EdgeWatcher が停止しています。タップして観測を再開してください。」
 
-一方、**アラーム発火による撮影はこの制限に掛からない。** サービスは既に前面で
-動いており、新たに Foreground Service を開始しているわけではないため。
-制限が効くのは起動の瞬間（boot と再生成）だけである。
+**この分岐は SDK ≤33 側を検証できない**（§11.2）。したがって分岐は
+`if (Build.VERSION.SDK_INT >= 34)` の1箇所に閉じ込め、両側の処理を最小に保つ。
 
-## 13. エラー処理の総括
+---
 
-端末が取りうる行動は4つしかない。すべてのエラーはこのいずれかに写像される。
+## 10. テスト戦略 — 書くのは4本だけ
 
-| 行動 | 対象 |
-| --- | --- |
-| リトライする | `/device/pair` の 404（最大4リクエスト）、アップロードの 5xx・ネットワーク断（指数バックオフ） |
-| フレームを捨てる | アップロードの 400 と 413 |
-| セッションを取り直す | アップロード・ログアウトの 401 と 403 |
-| 資格情報を捨てて未ペアリングへ戻る | `/device/token` の 401 のみ |
+**方針: 実機を見れば分かる不具合にテストを書かない。**
 
-最後の行を狭く保つことが、この設計でもっとも重要な制約である。
-ここが広がると、通信状態が悪いだけの端末が現地に行かないと復旧できなくなる。
+書くのは、**壊れても実機では静かに間違うもの**、あるいは**実機で再現するのが非現実的なもの**
+だけに限る。すべて JVM ユニットテストであり、エミュレータを必要としない（§2.1 の規約による）。
 
-## 14. テスト戦略
-
-グランドルール（TDD）に従い、すべての機能は失敗するテストから書く。
-配分は「実際に Red を観測できる場所」を基準に決める。
-
-| 層 | 実行環境 | 対象 |
+| # | 対象 | 書く理由 |
 | --- | --- | --- |
-| `:domain` 単体テスト | JVM | ペアリングのリトライ判定、セッション自己修復、バッファ退避、送信順序、指数バックオフ、エラー分類、画像方針とサイズガード、ULID 採番、`nextConfig` 適用、状態行の文言 |
-| `:app` JVM テスト | JVM + MockWebServer | `api.yml` の応答を再現し、multipart のパート名・Content-Type・`Authorization` が素のトークンであることを検証 |
-| Robolectric | JVM | Room の DAO、通知の文言、権限分岐、Compose 画面の状態別表示、`BOOT_COMPLETED` の SDK 分岐 |
-| 計装テスト | — | 書かない |
+| 1 | `IdGenerator.ulid(capturedAt)` の採番時刻が `capturedAt` と一致する | ずれるとサーバ側で観測が別の日に並ぶが、**端末画面には何も現れない** |
+| 2 | HTTP status → `ApiFailure` の分類 | 1行の取り違えで「二度と繋がらない」か「無限再送」になる。§8 の 401/403 の扱いと §8.2 の「5xx で消さない」をここで固定する |
+| 3 | バッファの eviction（288件 と 500MiB の先着） | 実機で 500MiB まで貯めて確かめるのは非現実的 |
+| 4 | 送信順序（最新1枚 → 以後古い順） | 復帰時にしか現れず、実機での再現に長時間のオフラインを要する |
 
-Robolectric の `@Config(sdk = ...)` で API レベルを切り替えられるため、
-**実機（Android 16）では確かめようのない「Android 13 以下は自動復帰する」経路を
-ここで検証する。** 実機で踏めない分岐をテストで押さえる、という役割分担である。
+### 10.1 書かないもの
 
-計装テストを書かないのは、カメラの実撮影・Foreground Service の実起動・実アラームは
-自動化しても不安定で、緑になっても得られる確信が低いため。代わりに実機での
-手動スモークを行う。
+UI テスト、計装テスト、Robolectric、Room マイグレーションテスト、MockWebServer による
+ネットワーク層のテスト。
 
-### 実機スモーク手順（Android 16 実機）
+Room のスキーマは **v1 のみ**とし、変更時は `fallbackToDestructiveMigration` を使う。
+バッファを失っても観測が数枚欠けるだけであり、マイグレーションを書いて維持する費用に見合わない。
 
-1. `mock` フレーバーを入れ、Web をモックモードで動かして QR を読み、ペアリングが成立する
-2. 権限ゲートの3権限を許可 / 拒否したときの表示を確認する
+---
+
+## 11. 受け入れ
+
+個々の実装タスクの完了条件ではなく、統合後にまとめて確認する（§0）。
+実機を常時給電で設置して行う。
+
+### 11.1 手順
+
+1. QR を読んでペアリングが成立する。404 のリトライが効いていることを含む
+2. 権限を許可 / 拒否したときの表示が正しい
 3. `[画角を合わせる]` でライブプレビューが出て、もう一度押すと戻る
-4. プレビュー中も5分間隔の撮影が止まらない（通知の「最終送信」が更新される）
-5. 画面を消して15分放置し、撮影と送信が続いていることを確認する
-6. `live` フレーバーで機内モードにし、`Offline / N件待機中` に変わることを確認する
-7. 機内モードを解除し、最新の1枚が先に送られることを Web 側で確認する
-8. 端末を再起動し、復帰要求の通知が出てタップで観測が再開することを確認する
-9. Web から端末を削除し、次の送信で未ペアリング画面へ理由付きで戻ることを確認する
-10. ログアウトの確認ダイアログを経て未ペアリング画面へ戻ることを確認する
+4. **プレビューの ON / OFF を跨いでも送信が途切れない**（通知の「最終送信」が更新される）
+5. **画面を消して3時間以上放置し、欠測がない**
+6. 機内モード30分 → `オフライン / N件待機中` に変わる
+7. 機内モード解除 → **最新の1枚が先に** Web のダッシュボードへ現れ、そのあと古い分が埋まる
+8. 再起動 → 復帰要求の通知が出て、タップで観測が再開する（Android 14 以上の経路）
+9. Web から端末を切断 → 次の送信で未ペアリング画面へ理由付きで戻る
+10. ログアウトの確認ダイアログを経て未ペアリング画面へ戻り、Web 側が `DISCONNECTED` になる
 
-手順 6・7・9 は稼働中の `live` バックエンド（AWS の dev 環境）を必要とする。
-接続先が用意できていない段階では、この3手順を保留として明示的に報告する。
+手順 6・7・9・10 は稼働中の dev バックエンドを必要とする。
 
-Android 13 以下の実機は手元に無いため、手順 8 の自動復帰経路は
-Robolectric のテストで担保し、実機確認の対象外とする。
+### 11.2 検証できない経路を明示する
 
-## 15. docs の更新
+**Android 13 以下の実機は手元に無いため、§9.3 の自動復帰経路は検証できない。**
+Robolectric を書かない方針（§10.1）と合わせ、この経路は**未検証のまま出荷する**。
 
-本設計の確定に伴い、次を更新する。
+これを許容するのは、当該経路が `BOOT_COMPLETED` を受けて `startForegroundService` を
+呼ぶだけであり、分岐が1箇所に閉じているためである。壊れていた場合の影響は
+「古い端末で再起動後に自動復帰しない」に留まり、通知経由の手動再開は
+どのバージョンでも動く。**この判断は本書に記録し、後から実機が手に入った時点で確認する。**
 
-| 対象 | 内容 |
+---
+
+## 12. 既存ドキュメントの修正
+
+実装と並行して直す。放置すると、次に読む人が誤った実装を書く。
+
+| 対象 | 修正内容 |
 | --- | --- |
-| `01-openquestion.md` APP-01 | `open` → `decided`。初期値5分 |
-| `01-openquestion.md` APP-03 | `pending` → `decided`。長辺1600px / 品質80 / サムネイル長辺160px・品質70 |
-| `01-openquestion.md` APP-04 | `pending` → `decided`。CameraX / `lastLocation` / 計装テストは書かない |
+| `04-native.md` §1.9 | 「401 を起点」→「401 と 403 を起点」。§8.1 の理由を添える |
+| `04-native.md` §1.4 | 401 と書かれている箇所を揃える |
+| `04-native.md` §1.5 | サムネイル「長辺160px」→「長辺480px」 |
 | `04-native.md` §5 | 未確定事項の表から解決済みの項目を削り、決定値を本文へ反映 |
-| `04-native.md` §1.9 | 実際に届くのは 403 である旨を追記（`api.yml` との食い違いの解消） |
-| `docs/mocks/native-mocks.html` | 端末名を出している2箇所（`paired` シナリオの見出し、常駐通知2種）から端末名を削る |
+| `api.yml` `/device/uploads` | `thumbnail` の説明「長辺160px」→「長辺480px」 |
+| `01-openquestion.md` APP-01 | `open` → `decided`（5分。backend の `defaultInterval` と同一） |
+| `01-openquestion.md` APP-03 | `pending` → `decided`（本画像 1600px/q80、サムネイル 480px/q75） |
+| `01-openquestion.md` APP-04 | `pending` → `decided`（CameraX / `lastLocation` / §10 のテスト方針） |
+| `docs/mocks/native-mocks.html` | 端末名を出している3箇所（`paired` シナリオの見出し、常駐通知2種）から端末名を削る（§4.3） |
 
-## 16. 実装フェーズ
+---
 
-| # | 内容 | 完了条件 |
-| --- | --- | --- |
-| 0 | Gradle の骨組み、2モジュール、フレーバー、バージョンカタログ | `./gradlew test` が緑 |
-| 1 | `:domain` の純ロジックを TDD で実装 | 要件の判断がすべて JVM テストで覆われている |
-| 2 | `EdgeWatcherApi` の OkHttp 実装、`mock` フレーバーの偽バックエンド | MockWebServer のテストが緑 |
-| 3 | 永続化（Room + `EncryptedSharedPreferences`） | Robolectric の DAO テストが緑 |
-| 4 | カメラ・位置・アラーム・Foreground Service | 実機で撮影と送信が回る |
-| 5 | UI と通知 | モックの14シナリオが再現できる |
-| 6 | 再起動復帰、バッテリー最適化・正確なアラームの誘導 | 実機スモーク 8 が通る |
-| 7 | 実機スモーク一式と docs 更新（§15） | 手順1〜10 の結果を報告 |
+## 13. リポジトリ・CI・配布
 
-フェーズ1が全体の中心である。ここが終わった時点で、要件に書かれた判断の大半は
-Android を一切起動せずに検証済みになる。
+- Gradle プロジェクトを **`android/`** に置く（`backend/` `web/` `infra/` と並べる）
+- API のベース URL は `buildConfigField` で dev / prod を切り替える。
+  API Gateway の URL は秘密ではないため `gradle.properties` に置いてよい
+- GitHub Actions は **検証のみ**。PR と `develop` への push で
+  `ktlint` + JVM ユニットテスト + `assembleDebug` を回す
+- **配布は実機への直接インストール。** 署名鍵の管理、Play への公開、難読化は範囲外
+
+---
+
+## 14. やらないこと
+
+Play 配布・リリース署名鍵・難読化 / `mock` フレーバーと偽バックエンド /
+端末側の設定画面 / 証明書ピンニング / 画像のローカル暗号化 /
+`ACCESS_BACKGROUND_LOCATION` / Room マイグレーション / 計装テスト・UI テスト・Robolectric /
+複数端末プロファイル / 端末からの端末削除 / 直近に送った画像のサムネイル表示
+
+これらを外す判断は `04-native.md` §3.6（端末側 UI を最小に保つ理由）と、
+本書 §0.1（完成を最優先する）に基づく。
