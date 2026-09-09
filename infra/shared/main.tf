@@ -26,6 +26,7 @@ terraform {
 
 provider "aws" {
   region = var.region
+  profile = var.profile
 
   default_tags {
     tags = {
@@ -70,12 +71,28 @@ locals {
   repo_subject_prefix = "repo:${var.github_owner}/${var.github_repo}"
 
   # plan は PR から走るため branch / pull_request の両方を許す。
-  # apply / deploy は workflow_dispatch を起点とする特定ブランチのみ。
   plan_subjects = [
     "${local.repo_subject_prefix}:pull_request",
     "${local.repo_subject_prefix}:ref:refs/heads/*",
   ]
 }
+
+# ---------------------------------------------------------------------------
+# sub クレームの形は、ジョブが environment を宣言しているかで変わる
+#
+#   environment なし : repo:<owner>/<repo>:ref:refs/heads/<branch>
+#   environment あり : repo:<owner>/<repo>:environment:<name>
+#
+# **environment を宣言するとブランチは sub から消える。**両方は入らない。
+# backend-deploy / web-deploy / infra-apply はいずれも environment: を
+# 宣言しているため、ここで ref 形を期待すると AssumeRoleWithWebIdentity が
+# AccessDenied になる(実際になった)。
+#
+# ブランチの制限は sub とは別の ref クレームで担保する。GitHub の
+# Environment 側の「デプロイ可能ブランチ」でも同じことはできるが、それだと
+# 強制する場所が AWS の外に出てしまい、この state を読んでも何が許されて
+# いるのか分からなくなる。
+# ---------------------------------------------------------------------------
 
 data "aws_iam_policy_document" "github_assume" {
   for_each = local.roles
@@ -100,6 +117,19 @@ data "aws_iam_policy_document" "github_assume" {
       variable = "token.actions.githubusercontent.com:sub"
       values   = each.value.subjects
     }
+
+    # ref は sub とは別のクレームとしてトークンに常に入っている。
+    # refs/heads/* に限ることでタグや PR の ref を除外している
+    # (これが environment 形の sub で失われたブランチ側の縛り)。
+    dynamic "condition" {
+      for_each = length(each.value.refs) == 0 ? [] : [each.value.refs]
+
+      content {
+        test     = "StringLike"
+        variable = "token.actions.githubusercontent.com:ref"
+        values   = condition.value
+      }
+    }
   }
 }
 
@@ -111,22 +141,30 @@ locals {
     {
       # PR で自動実行される plan には読み取り権限しか渡らない。
       # PR 経由で本番リソースが変更される経路が構造的に閉じる(02-infra.md §8)。
+      # plan を走らせるワークフローはまだ無い。追加するときに
+      # environment: を宣言するなら、subjects も environment 形に
+      # 変える必要がある(上のコメント)。
       "edgewatcher-ci-plan" = {
         subjects = local.plan_subjects
+        refs     = []
         managed  = ["arn:aws:iam::aws:policy/ReadOnlyAccess"]
         inline   = data.aws_iam_policy_document.tfstate_read.json
       }
     },
     {
+      # refs をブランチ全体に開けてあるのは暫定。ワークフローが main に
+      # 乗ったら ["refs/heads/main"] に絞る。1行で戻せる。
       for env in local.envs : "edgewatcher-ci-apply-${env}" => {
-        subjects = ["${local.repo_subject_prefix}:ref:refs/heads/*"]
+        subjects = ["${local.repo_subject_prefix}:environment:${env}"]
+        refs     = ["refs/heads/*"]
         managed  = ["arn:aws:iam::aws:policy/AdministratorAccess"]
         inline   = null
       }
     },
     {
       for env in local.envs : "edgewatcher-ci-deploy-${env}" => {
-        subjects = ["${local.repo_subject_prefix}:ref:refs/heads/*"]
+        subjects = ["${local.repo_subject_prefix}:environment:${env}"]
+        refs     = ["refs/heads/*"]
         managed  = []
         inline   = data.aws_iam_policy_document.deploy[env].json
       }

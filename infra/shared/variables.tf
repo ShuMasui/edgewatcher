@@ -4,6 +4,12 @@ variable "region" {
   default     = "us-east-1"
 }
 
+variable "profile" {
+  description = "AWS profile名です"
+  type        = string
+  default     = "edgewatcher"
+}
+
 variable "github_owner" {
   description = "GitHub のオーナー名。OIDC の sub 条件に使う。"
   type        = string
