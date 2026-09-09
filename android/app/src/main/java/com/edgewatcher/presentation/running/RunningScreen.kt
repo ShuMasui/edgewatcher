@@ -117,6 +117,20 @@ fun RunningScreen(
             Button(onClick = { ObservationService.start(context) }) { Text("観測を再開") }
         }
 
+        // 権限とは別枠の2つの設定。満たされている間は何も出ないので、
+        // 通常運用で画面が増えることはない。強制もしない。
+        if (!isIgnoringBatteryOptimizations(context)) {
+            TextButton(onClick = { requestIgnoreBatteryOptimizations(context) }) {
+                Text("バッテリー最適化の対象から外す")
+            }
+        }
+
+        if (!canScheduleExactAlarms(context)) {
+            TextButton(onClick = { requestExactAlarmPermission(context) }) {
+                Text("正確なアラームを許可する")
+            }
+        }
+
         TextButton(onClick = { confirmingLogout = true }) { Text("ログアウト") }
     }
 
