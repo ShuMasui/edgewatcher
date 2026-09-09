@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS" />
+
+    <uses-feature android:name="android.hardware.camera.any" android:required="true" />
+
+    <!--
+    Ruling T1-1: platform theme, not Material3. This XML theme's only job is to
+    supply an ActionBar-less window; every pixel in this app is drawn by Compose,
+    where MaterialTheme {} owns the styling. Pulling in Material Components (plus
+    AppCompat) just for one theme string would be dependency weight with no
+    consumer. Do not "fix" this back to a Theme.Material3.* style without also
+    adding com.google.android.material:material as a real dependency.
+    -->
+    <application
+        android:name=".EdgeWatcherApp"
+        android:allowBackup="false"
+        android:label="EdgeWatcher"
+        android:supportsRtl="false"
+        android:usesCleartextTraffic="false"
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
+
+        <!--
+        Task 1: MainActivity, ObservationService, BootReceiver and AlarmReceiver do not
+        exist yet, so the manifest's class references would fail to link. The four blocks
+        below are commented out for now and are restored in Task 18.
+        -->
+        <!--
+        <activity
+            android:name=".presentation.MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:screenOrientation="portrait">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        -->
+
+        <!--
+        <service
+            android:name=".infrastructure.service.ObservationService"
+            android:exported="false"
+            android:foregroundServiceType="camera|location" />
+        -->
+
+        <!--
+        <receiver
+            android:name=".infrastructure.service.BootReceiver"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+        -->
+
+        <!--
+        <receiver
+            android:name=".infrastructure.service.AlarmReceiver"
+            android:exported="false" />
+        -->
+    </application>
+</manifest>
