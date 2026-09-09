@@ -477,7 +477,7 @@ local.properties
 `MainActivity` と `ObservationService` と `BootReceiver` と `AlarmReceiver` はまだ無いので、
 この時点ではマニフェストの参照解決でリンクが失敗する。**Step 7 のマニフェストから
 `<activity>` `<service>` `<receiver>` x2 の**4ブロック**を一時的にコメントアウトし**、
-アプリ本体だけが通ることを確認する。Task 20 でコメントを外す。
+アプリ本体だけが通ることを確認する。Task 18 でコメントを外す。
 
 Run: `cd android && ./gradlew :app:assembleDebug`
 Expected: `BUILD SUCCESSFUL`
