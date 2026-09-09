@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { useAuth } from '../hooks/use-auth';
 
 export const LoginPage: React.FC = () => {
-  const { isAuthenticated, login } = useAuth();
+  const { isAuthenticated, login, error } = useAuth();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
 
@@ -24,6 +24,11 @@ export const LoginPage: React.FC = () => {
           <br />
           屋外の定点観測カメラとして使う。
         </p>
+        {error && (
+          <p className="login-error" role="alert" data-testid="login-error">
+            {error}
+          </p>
+        )}
         <span className="label">サインイン</span>
         <button className="google" onClick={login} data-testid="google-login-btn">
           <svg viewBox="0 0 48 48" aria-hidden="true">

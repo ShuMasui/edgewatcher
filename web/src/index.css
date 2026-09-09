@@ -593,6 +593,17 @@ select {
   width: 316px;
 }
 
+.login-error {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border: var(--rule);
+  border-color: var(--alarm);
+  border-radius: var(--radius);
+  color: var(--alarm);
+  font-size: 13px;
+  line-height: 1.6;
+}
+
 .login-box .mark {
   margin-bottom: 22px;
 }
