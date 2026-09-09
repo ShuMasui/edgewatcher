@@ -40,8 +40,9 @@ provider "aws" {
 # CloudFront 用の ACM 証明書は us-east-1 に存在しなければならない
 # (02-infra.md §3)。root_domain 確定後に domain モジュールが使う。
 provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
+  alias   = "us_east_1"
+  region  = "us-east-1"
+  profile = var.profile
 
   default_tags {
     tags = {

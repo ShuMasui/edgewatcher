@@ -161,9 +161,10 @@ data "aws_iam_policy_document" "github_assume" {
       values   = each.value.subjects
     }
 
-    # ref は sub とは別のクレームとしてトークンに常に入っている。
-    # refs/heads/* に限ることでタグや PR の ref を除外している
-    # (これが environment 形の sub で失われたブランチ側の縛り)。
+    # ref は sub とは別のクレームとしてトークンに入っている。environment
+    # 形の sub ではブランチが分からないので、ブランチで縛りたくなったら
+    # ここを使う。**まだ実測していない**ので、現在どのロールも refs を
+    # 空にしており、この block は生成されない。
     dynamic "condition" {
       for_each = length(each.value.refs) == 0 ? [] : [each.value.refs]
 
@@ -195,8 +196,10 @@ locals {
       }
     },
     {
-      # refs をブランチ全体に開けてあるのは暫定。ワークフローが main に
-      # 乗ったら ["refs/heads/main"] に絞る。1行で戻せる。
+      # refs を空にしてあるのは暫定。ref クレームを IAM の条件キーとして
+      # 使えることをまだ実測できていないため、まず sub だけで通ることを
+      # 確かめる。もともと refs/heads/* で全ブランチを許していたので、
+      # ここを空にしても実効的な制限は失われていない。
       for env in local.envs : "edgewatcher-ci-apply-${env}" => {
         subjects = [for prefix in local.repo_subject_prefixes : "${prefix}:environment:${env}"]
         refs     = []
