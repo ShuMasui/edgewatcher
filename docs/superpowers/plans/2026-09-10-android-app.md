@@ -408,7 +408,7 @@ dependencies {
         android:label="EdgeWatcher"
         android:supportsRtl="false"
         android:usesCleartextTraffic="false"
-        android:theme="@style/Theme.Material3.DayNight.NoActionBar">
+        android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
             android:name=".presentation.MainActivity"
@@ -440,6 +440,12 @@ dependencies {
     </application>
 </manifest>
 ```
+
+`android:theme` にプラットフォームのテーマを直接指定しているのは、**この XML テーマが
+「ActionBar の無い入れ物」以上の仕事をしないため**である。画面は全面 Compose で、
+配色も字も `MaterialTheme {}` が決める。`Theme.Material3.*` を使うには
+`com.google.android.material:material`（と AppCompat 一式）が要るが、
+テーマ文字列1つのために XML テーマのライブラリを丸ごと引き込むことになる。
 
 - [ ] **Step 8: `EdgeWatcherApp.kt` を書く**
 
