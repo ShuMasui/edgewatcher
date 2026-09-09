@@ -15,10 +15,10 @@ infra/
 
 **2つの未決事項がブロッカーになりうるため、optional 変数で切り離してある。**
 
-| 変数 | `null` のとき | 参照 |
-| --- | --- | --- |
-| `root_domain` | Route53・ACM・カスタムドメインを作らない。`*.cloudfront.net` と `execute-api` の既定 URL で動作する | OPS-01 |
-| `google_idp_enabled` | Google IdP を作らない。User Pool と Hosted UI だけが立つ(この間は誰もログインできない) | AUTH-07 |
+| 変数                 | `null` のとき                                                                                       | 参照    |
+| -------------------- | --------------------------------------------------------------------------------------------------- | ------- |
+| `root_domain`        | Route53・ACM・カスタムドメインを作らない。`*.cloudfront.net` と `execute-api` の既定 URL で動作する | OPS-01  |
+| `google_idp_enabled` | Google IdP を作らない。User Pool と Hosted UI だけが立つ(この間は誰もログインできない)              | AUTH-07 |
 
 **確定したら値を埋めて apply するだけでよい。**コードの書き換えは不要。
 
@@ -46,7 +46,7 @@ Terraform を動かすための資格情報そのものは Terraform では作�
 [edgewatcher]
 aws_access_key_id     = ...
 aws_secret_access_key = ...
-region                = ap-northeast-1
+region                = us-east-1
 ```
 
 ```sh
@@ -80,18 +80,23 @@ terraform plan     # 内容を確認してから
 terraform apply
 ```
 
-出力されたバケット名を控える。
+作られたバケット名が、各スタックの `backend` ブロックに書いてある文字列と
+一致していることを確認する。
 
 ```sh
-terraform output -raw tfstate_bucket
+terraform output -raw tfstate_bucket   # edgewatcher-tfstate-<アカウントID>
 ```
 
 続いて `bootstrap/main.tf` の `backend "s3"` ブロックのコメントを外し、state を移行する。
 
 ```sh
-terraform init -migrate-state \
-  -backend-config="bucket=$(terraform output -raw tfstate_bucket)"
+terraform init -migrate-state
 ```
+
+**`-backend-config` は要らない。**バケット名はコード側にリテラルで書いてある。
+state の置き場をコマンドラインの引数で決める方式にすると、「どの state に
+向いているか」がコードと手順書に分かれて存在することになり、渡し間違えても
+plan は普通に通ってしまう。
 
 この手順は一度きりで、以後 `bootstrap` を触ることはほとんどない。
 
@@ -107,22 +112,20 @@ GitHub Actions 用の OIDC プロバイダと CI ロールを作る。長期の�
 
 ```sh
 cd infra/shared
-export TFSTATE_BUCKET=edgewatcher-tfstate-<アカウントID>
-
-terraform init -backend-config="bucket=${TFSTATE_BUCKET}"
-terraform plan -var="tfstate_bucket=${TFSTATE_BUCKET}"
-terraform apply -var="tfstate_bucket=${TFSTATE_BUCKET}"
+terraform init
+terraform plan
+terraform apply
 ```
 
 `github_owner` / `github_repo` は `terraform.tfvars` に置く。
 
 作られるロール:
 
-| ロール | 権限 | 使うワークフロー |
-| --- | --- | --- |
-| `edgewatcher-ci-plan` | 読み取り専用 + tfstate の読み取り | PR 時の `terraform plan` |
-| `edgewatcher-ci-apply-dev` / `-prod` | 書き込み | `workflow_dispatch` の apply |
-| `edgewatcher-ci-deploy-dev` / `-prod` | Lambda のコード更新、S3 同期、CloudFront invalidation | アプリコードのデプロイ |
+| ロール                                | 権限                                                  | 使うワークフロー                |
+| ------------------------------------- | ----------------------------------------------------- | ------------------------------- |
+| `edgewatcher-ci-plan`                 | 読み取り専用 + tfstate の読み取り                     | PR 時の `terraform plan`        |
+| `edgewatcher-ci-apply-dev` / `-prod`  | 書き込み                                              | `workflow_dispatch` の apply    |
+| `edgewatcher-ci-deploy-dev` / `-prod` | Lambda のコード更新、S3 同期、CloudFront invalidation | `backend-deploy` / `web-deploy` |
 
 PR で自動実行される plan には読み取りロールしか渡らないため、
 **PR 経由で本番リソースが変更される経路が構造的に閉じる**。
@@ -133,7 +136,7 @@ PR で自動実行される plan には読み取りロールしか渡らない�
 
 ```sh
 cd infra/envs/dev
-terraform init -backend-config="bucket=${TFSTATE_BUCKET}"
+terraform init
 terraform plan
 terraform apply
 ```
@@ -230,12 +233,12 @@ WEB=$(terraform output -raw web_url)
 API=$(terraform output -raw api_url)
 ```
 
-| # | 確認 | 期待 |
-| --- | --- | --- |
-| 1 | `open $WEB` | 疎通確認用ページが表示される |
-| 2 | `curl -s -o /dev/null -w '%{http_code}\n' $WEB/no-such-path` | `200`(SPA フォールバック) |
-| 3 | `curl -s -o /dev/null -w '%{http_code}\n' $API/devices` | `401`(JWT オーソライザが未認証を拒否) |
-| 4 | `curl -s -o /dev/null -w '%{http_code}\n' $API/device/uploads -X POST` | `401`(Lambda オーソライザが拒否) |
+| #   | 確認                                                                   | 期待                                  |
+| --- | ---------------------------------------------------------------------- | ------------------------------------- |
+| 1   | `open $WEB`                                                            | 疎通確認用ページが表示される          |
+| 2   | `curl -s -o /dev/null -w '%{http_code}\n' $WEB/no-such-path`           | `200`(SPA フォールバック)             |
+| 3   | `curl -s -o /dev/null -w '%{http_code}\n' $API/devices`                | `401`(JWT オーソライザが未認証を拒否) |
+| 4   | `curl -s -o /dev/null -w '%{http_code}\n' $API/device/uploads -X POST` | `401`(Lambda オーソライザが拒否)      |
 
 **3 と 4 が通れば、オーソライザとルーティングの結線は正しい。**
 これらは Lambda を呼ぶ前に判定されるため、ハンドラのコードがなくても検証できる。
@@ -244,6 +247,44 @@ API=$(terraform output -raw api_url)
 > Go のバイナリはまだない(`docs/02-infra.md` §5)。**502 は想定どおりの結果**で、
 > API Gateway → Lambda の統合と invoke 権限が正しく張れていることの裏返しでもある。
 > 実際の応答は `05-backend.md` に基づく Go の実装をデプロイしてから確認する。
+
+---
+
+## GitHub 側の設定
+
+CI から AWS を触るのに必要なのは **OIDC ロールと、いくつかの変数だけ**である。
+アクセスキーは発行しない。値はいずれも秘密ではないので Secrets ではなく
+Variables に置く(Secrets はマスクされるためログが読みにくくなる)。
+
+Environment(`dev` / `prod`)ごとに設定する。ワークフローは
+`environment:` を宣言しているので、`vars.*` は環境ごとに解決される。
+
+| 変数                         | 取得元                                                    | 使うワークフロー            |
+| ---------------------------- | --------------------------------------------------------- | --------------------------- |
+| `AWS_ACCOUNT_ID`             | `terraform -chdir=infra/bootstrap output -raw account_id` | 全て(ロール ARN の組み立て) |
+| `VITE_API_BASE_URL`          | `terraform output -raw api_url`                           | web-deploy                  |
+| `VITE_COGNITO_DOMAIN`        | `terraform output -raw cognito_hosted_ui`                 | web-deploy                  |
+| `VITE_COGNITO_CLIENT_ID`     | `terraform output -raw cognito_client_id`                 | web-deploy                  |
+| `CLOUDFRONT_DISTRIBUTION_ID` | `terraform output -raw cloudfront_distribution_id`        | web-deploy                  |
+
+`VITE_REDIRECT_URI` / `VITE_LOGOUT_URI` は**あえて設定しない**。未設定なら
+`web/src/config/env.ts` が `window.location.origin` を使い、それは配信元の
+ドメインそのものになる。焼き込むと Cognito のコールバック URL と二重管理になり、
+ずれた瞬間に `redirect_mismatch` でログインできなくなる。
+
+### ワークフローと使うロールの対応
+
+| ワークフロー     | 起点                           | ロール                        | できること                      |
+| ---------------- | ------------------------------ | ----------------------------- | ------------------------------- |
+| `backend-deploy` | `develop` への push / dispatch | `edgewatcher-ci-deploy-<env>` | Lambda のコード更新のみ         |
+| `web-deploy`     | `develop` への push / dispatch | `edgewatcher-ci-deploy-<env>` | S3 同期と CloudFront 無効化のみ |
+| `infra-apply`    | `main` からの dispatch のみ    | `edgewatcher-ci-apply-<env>`  | Terraform の apply(管理者権限)  |
+
+**デプロイ用ロールはインフラを変更できない。** ポリシーに Lambda のコード更新・
+Web バケットの同期・invalidation しか入っていないため、アプリのデプロイが
+誤ってインフラを壊す経路が構造として存在しない。逆に `infra-apply` は
+`refs/heads/main` からしか assume できないので、開発ブランチから本番構成が
+変わることもない。
 
 ---
 

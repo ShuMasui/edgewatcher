@@ -75,11 +75,14 @@ func NewClient(t *testing.T) *dynamodb.Client {
 	})
 }
 
-// CreateTable creates a table matching infra/modules/data/main.tf exactly:
-// PK/SK, GSI1 with its INCLUDE projection, GSI2 as KEYS_ONLY, and the
-// expiresAt TTL. The table name is random per call so parallel and repeated
+// CreateTable creates a table matching infra/modules/data/main.tf's key
+// schema and indexes: PK/SK, GSI1 with its INCLUDE projection, and GSI2 as
+// KEYS_ONLY. The table name is random per call so parallel and repeated
 // runs against one DynamoDB Local instance never collide; cleanup is
 // registered on t.
+//
+// It deliberately does NOT enable the expiresAt TTL that Terraform enables
+// in production. See the comment below the CreateTable call.
 func CreateTable(t *testing.T, client *dynamodb.Client) string {
 	t.Helper()
 	ctx := context.Background()
@@ -129,16 +132,29 @@ func CreateTable(t *testing.T, client *dynamodb.Client) string {
 		t.Fatalf("create test table: %v", err)
 	}
 
-	_, err = client.UpdateTimeToLive(ctx, &dynamodb.UpdateTimeToLiveInput{
-		TableName: &table,
-		TimeToLiveSpecification: &types.TimeToLiveSpecification{
-			AttributeName: aws.String("expiresAt"),
-			Enabled:       aws.Bool(true),
-		},
-	})
-	if err != nil {
-		t.Fatalf("enable ttl: %v", err)
-	}
+	// The expiresAt TTL is NOT enabled here, even though
+	// infra/modules/data/main.tf enables it in production.
+	//
+	// DynamoDB Local runs a real reaper on real wall-clock time — measured
+	// at roughly a 5-second sweep — while the tests run on a fixed fake
+	// clock (internal/e2e's movableClock starts at 2026-09-08). Every row
+	// those tests write is therefore born already expired, and whether a
+	// sweep lands between a write and the read that follows it is pure
+	// timing. That surfaced as pairing codes intermittently resolving to
+	// PAIRING_NOT_FOUND, and as consumed codes reporting EXPIRED instead of
+	// CONSUMED (the reaper removes the row that
+	// ReturnValuesOnConditionCheckFailure would otherwise have returned).
+	//
+	// Advancing the fake clock past today only postpones this: the date is
+	// a literal, so it becomes the past again as wall-clock time moves. The
+	// fake clock and a real-time reaper cannot both be right.
+	//
+	// Nothing is lost by leaving it off. TTL affects only background
+	// deletion, never reads or writes, and no test asserts that a row is
+	// eventually deleted — none could, since real DynamoDB only promises
+	// removal "within 48 hours". What the tests do check is that expiresAt
+	// is written with the right value, which is an attribute assertion and
+	// works the same either way.
 
 	t.Cleanup(func() {
 		_, _ = client.DeleteTable(context.Background(), &dynamodb.DeleteTableInput{TableName: &table})

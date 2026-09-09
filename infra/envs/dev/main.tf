@@ -8,17 +8,25 @@ terraform {
     }
   }
 
-  # bucket は bootstrap の出力に依存するため、init に -backend-config で渡す。
+  # tfstate の置き場。backend ブロックには変数も式も書けないため、値は
+  # リテラルで持つ。バケット名は bootstrap が
+  #   edgewatcher-tfstate-<アカウントID>-<version>
+  # で決め打ちするので、-backend-config で外から渡す理由がない。
+  # 渡す方式にすると、init のたびに正しい文字列を手で与える必要があり、
+  # 間違えたときに「別の state に向いたまま plan が通る」という最悪の
+  # 壊れ方をする。アカウント ID は秘密ではない(infra/README.md Phase 0)。
   backend "s3" {
+    bucket       = "edgewatcher-tfstate-606030504329-001"
     key          = "envs/dev/terraform.tfstate"
-    region       = "ap-northeast-1"
+    region       = "us-east-1"
     encrypt      = true
     use_lockfile = true
   }
 }
 
 provider "aws" {
-  region = var.region
+  region  = var.region
+  profile = var.profile
 
   default_tags {
     tags = {
@@ -32,8 +40,9 @@ provider "aws" {
 # CloudFront 用の ACM 証明書は us-east-1 に存在しなければならない
 # (02-infra.md §3)。root_domain 確定後に domain モジュールが使う。
 provider "aws" {
-  alias  = "us_east_1"
-  region = "us-east-1"
+  alias   = "us_east_1"
+  region  = "us-east-1"
+  profile = var.profile
 
   default_tags {
     tags = {
@@ -89,7 +98,7 @@ module "web_hosting" {
   acm_certificate_arn = null
 
   upload_placeholder = var.upload_placeholder
-  placeholder_html   = file("${path.module}/../../placeholder/index.html")
+  placeholder_html   = file("${path.module}/../../modules/placeholder/index.html")
 }
 
 # ---------------------------------------------------------------------------

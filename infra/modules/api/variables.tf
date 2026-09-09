@@ -63,7 +63,7 @@ variable "api_domain" {
 }
 
 variable "acm_certificate_arn" {
-  description = "API Gateway 用の ACM 証明書 ARN。ap-northeast-1 に必要(02-infra.md §3)。"
+  description = "API Gateway 用の ACM 証明書 ARN。us-east-1 に必要(02-infra.md §3)。"
   type        = string
   default     = null
 }

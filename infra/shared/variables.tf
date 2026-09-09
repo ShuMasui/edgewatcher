@@ -1,12 +1,13 @@
 variable "region" {
   description = "リージョン。"
   type        = string
-  default     = "ap-northeast-1"
+  default     = "us-east-1"
 }
 
-variable "tfstate_bucket" {
-  description = "bootstrap が作った tfstate バケット名。ci-plan ロールの読み取り許可に使う。"
+variable "profile" {
+  description = "AWS profile名です"
   type        = string
+  default     = "edgewatcher"
 }
 
 variable "github_owner" {
@@ -16,6 +17,21 @@ variable "github_owner" {
 
 variable "github_repo" {
   description = "GitHub のリポジトリ名。OIDC の sub 条件に使う。"
+  type        = string
+}
+
+# GitHub の既定の sub はオーナー名・リポジトリ名だけでなく、それぞれの
+# 数値 ID も含む(main.tf の repo_subject_prefixes を参照)。値は
+#   gh api users/<owner> --jq .id
+#   gh api repos/<owner>/<repo> --jq .id
+# で取れる。名前は変えられるが ID は変わらず再利用もされない。
+variable "github_owner_id" {
+  description = "GitHub オーナーの数値 ID。OIDC の sub 条件に使う。"
+  type        = string
+}
+
+variable "github_repo_id" {
+  description = "GitHub リポジトリの数値 ID。OIDC の sub 条件に使う。"
   type        = string
 }
 

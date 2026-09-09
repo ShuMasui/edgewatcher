@@ -121,9 +121,14 @@ resource "aws_dynamodb_table" "main" {
   }
 
   # 観測レコードは TTL で日常的に消えるが、テーブルそのものを
-  # 取り違えて消すのは致命的。
+  # 取り違えて消すのは致命的。terraform destroy はここで止まる。
+  #
+  # 意図してテーブルごと捨てるときは、この行を false にする変更を
+  # 単独でコミットしてから destroy する。「消してよい」という判断を
+  # コードの差分として残すためで、-target や手作業の握り潰しでは
+  # その判断が履歴に残らない。
   lifecycle {
-    prevent_destroy = false
+    prevent_destroy = true
   }
 
   tags = {

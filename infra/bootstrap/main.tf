@@ -9,20 +9,27 @@ terraform {
   }
 
   # bootstrap は自分自身が作るバケットに state を置く(鶏卵問題)。
-  # 初回はローカル state で apply し、その後に下記を有効化して
-  #   terraform init -migrate-state -backend-config="bucket=<出力された名前>"
-  # で移行する。詳細は infra/README.md。
-
-  backend "s3" {
-    key          = "bootstrap/terraform.tfstate"
-    region       = "ap-northeast-1"
-    encrypt      = true
-    use_lockfile = true
-  }
+  #
+  # そのため **初回だけはローカル state で apply する**。バケットが存在しない
+  # 状態でこのブロックが有効だと、terraform init が「無いバケット」を見に行って
+  # 失敗し、Terraform にはそれを自分で作る手段がない。
+  #
+  # apply が通ったら下のブロックのコメントを外し、
+  #   terraform init -migrate-state
+  # で state を移す。バケット名は決め打ちでよい(下記)。詳細は infra/README.md。
+  #
+  # backend "s3" {
+  #   bucket       = "edgewatcher-tfstate-606030504329-001"
+  #   key          = "bootstrap/terraform.tfstate"
+  #   region       = "us-east-1"
+  #   encrypt      = true
+  #   use_lockfile = true
+  # }
 }
 
 provider "aws" {
-  region = var.region
+  region  = var.region
+  profile = var.profile
 
   default_tags {
     tags = {
@@ -39,7 +46,7 @@ data "aws_caller_identity" "current" {}
 locals {
   # S3 のバケット名はグローバルに一意である必要があるため、アカウント ID を付ける
   # (02-infra.md §9)。
-  bucket_name = "edgewatcher-tfstate-${data.aws_caller_identity.current.account_id}"
+  bucket_name = "edgewatcher-tfstate-${data.aws_caller_identity.current.account_id}-001"
 }
 
 resource "aws_s3_bucket" "tfstate" {

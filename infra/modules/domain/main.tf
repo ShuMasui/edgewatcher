@@ -1,7 +1,7 @@
 # ACM 証明書は環境ごとに2枚必要(02-infra.md §3)。
 #
 #   CloudFront 用          : us-east-1 に存在しなければならない(CloudFront の仕様)
-#   API Gateway 用         : API と同じ ap-northeast-1 に必要
+#   API Gateway 用         : API と同じ us-east-1 に必要
 #
 # リージョン制約をこのモジュールの内側に閉じ込め、
 # 呼び出し側のコードに us-east-1 が漏れないようにする。
@@ -52,7 +52,7 @@ resource "aws_acm_certificate_validation" "web" {
   validation_record_fqdns = [for r in aws_route53_record.web_validation : r.fqdn]
 }
 
-# --- API Gateway 用(ap-northeast-1)---------------------------------------
+# --- API Gateway 用(us-east-1)---------------------------------------
 
 resource "aws_acm_certificate" "api" {
   domain_name       = var.api_domain

@@ -139,7 +139,7 @@ resource "aws_apigatewayv2_domain_name" "this" {
   domain_name = var.api_domain
 
   domain_name_configuration {
-    # API と同じ ap-northeast-1 の証明書が必要(02-infra.md §3)。
+    # API と同じ us-east-1 の証明書が必要(02-infra.md §3)。
     certificate_arn = var.acm_certificate_arn
     endpoint_type   = "REGIONAL"
     security_policy = "TLS_1_2"
