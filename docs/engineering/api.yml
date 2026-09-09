@@ -617,7 +617,7 @@ paths:
                 thumbnail:
                   type: string
                   format: binary
-                  description: サムネイル(JPEG、長辺160px)。空パートは 400。
+                  description: サムネイル(JPEG、長辺480px)。空パートは 400。
                 metadata:
                   $ref: "#/components/schemas/UploadMetadata"
             encoding:
