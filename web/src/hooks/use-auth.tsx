@@ -17,6 +17,8 @@ const AuthContext = createContext<AuthContextType | null>(null);
 
 interface AuthCallbackParams {
   code: string | null;
+  /** Echoed back by Cognito; compared against what this tab issued. */
+  state: string | null;
   error: string | null;
 }
 
@@ -35,6 +37,7 @@ function readAuthCallback(): AuthCallbackParams {
   const params = new URLSearchParams(window.location.search);
   return {
     code: params.get('code'),
+    state: params.get('state'),
     // Cognito reports a refused or failed federation this way rather than
     // by omitting the code, so both have to be inspected.
     error: params.get('error_description') || params.get('error'),
@@ -67,13 +70,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     exchanged.current = true;
 
     authService
-      .handleAuthCallback(callback.code)
+      .handleAuthCallback(callback.code, callback.state)
       .then(() => {
         setUser(authService.getUser());
         setIsAuthenticated(authService.isAuthenticated());
         setError(null);
       })
       .catch((err) => {
+        // The reason stays in the console and out of the screen. A refused
+        // state and an expired code call for the same action from the
+        // person in front of it — press the button again — while telling
+        // them which one happened would describe the check to whoever
+        // triggered it.
         console.error('OAuth callback failed:', err);
         // Surfaced rather than swallowed: a silent failure here is
         // indistinguishable from "the login button does nothing".
@@ -89,7 +97,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = () => {
     setError(null);
-    authService.login();
+    // login() became async when PKCE landed (crypto.subtle.digest). The
+    // caller is a click handler, so it is not awaited — but the rejection
+    // has to go somewhere, or a failure to even start the redirect would be
+    // an unhandled rejection and a button that silently does nothing.
+    authService.login().catch((err) => {
+      console.error('Failed to start the sign-in redirect:', err);
+      setError('サインインを開始できませんでした。もう一度お試しください。');
+    });
   };
 
   const logout = () => {
