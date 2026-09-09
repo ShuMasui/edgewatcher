@@ -98,7 +98,7 @@ module "web_hosting" {
   acm_certificate_arn = null
 
   upload_placeholder = var.upload_placeholder
-  placeholder_html   = file("${path.module}/../../placeholder/index.html")
+  placeholder_html   = file("${path.module}/../../modules/placeholder/index.html")
 }
 
 # ---------------------------------------------------------------------------

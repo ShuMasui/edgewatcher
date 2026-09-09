@@ -5,8 +5,8 @@ retention_days = 1
 
 # --- 確定したら埋める --------------------------------------------------------
 # root_domain        = "example.com"                     # OPS-01
-# google_client_id   = "xxx.apps.googleusercontent.com"  # AUTH-07(秘密ではない)
-# google_idp_enabled = true                              # AUTH-07。2段階目の apply で立てる
+google_client_id   = "778442804265-kv45ujc4j0r19pkovqgmtajoohf796nt.apps.googleusercontent.com"  # AUTH-07(秘密ではない)
+google_idp_enabled = true                              # AUTH-07。2段階目の apply で立てる
 #
 # client secret はここには**書かない**。Secrets Manager
 # (edgewatcher-dev-google-oauth-client-secret)に置き、apply 時に
