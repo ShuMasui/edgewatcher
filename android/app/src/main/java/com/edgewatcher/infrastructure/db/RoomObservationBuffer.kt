@@ -11,9 +11,13 @@ import java.time.Instant
 /**
  * バッファの実物。Room の行とアプリ専用ストレージのファイルを対で扱う。
  *
- * **書き込みはファイルが先、行が後。** 逆にすると、行はあるがファイルが無い
- * 状態がプロセス死で生まれ、送信側がその行で詰まる。
- * **削除は行が先、ファイルが後。** 行が消えていればもう誰も参照しない。
+ * **書き込みは行が先、ファイルが後。削除はファイルが先、行が後。**
+ *
+ * どちらもプロセス死の途中状態を「行はあるがファイルが無い」側に倒すための順序である。
+ * その状態は UploadNextObservationUseCase が次の送信で検出し、行ごと捨てて自己修復する。
+ * 逆向きにすると「ファイルはあるが行が無い」孤児が残るが、バッファの容量計算は DB の
+ * 行から導かれるためディスク上の孤児が見えず、回収する経路がどこにも無い。
+ * 数か月連続稼働する端末で、これは上限のない容量の増加になる。
  */
 class RoomObservationBuffer(
     private val dao: ObservationDao,
@@ -30,8 +34,6 @@ class RoomObservationBuffer(
         image: ByteArray,
         thumbnail: ByteArray,
     ) = withContext(Dispatchers.IO) {
-        imageFile(observation.observationId).writeBytes(image)
-        thumbnailFile(observation.observationId).writeBytes(thumbnail)
         dao.insert(
             ObservationEntity(
                 observationId = observation.observationId,
@@ -41,6 +43,8 @@ class RoomObservationBuffer(
                 totalBytes = observation.totalBytes,
             ),
         )
+        imageFile(observation.observationId).writeBytes(image)
+        thumbnailFile(observation.observationId).writeBytes(thumbnail)
     }
 
     override suspend fun readImage(observationId: String): ByteArray? =
@@ -52,16 +56,14 @@ class RoomObservationBuffer(
         }
 
     override suspend fun remove(observationId: String) = withContext(Dispatchers.IO) {
-        dao.delete(observationId)
         imageFile(observationId).delete()
         thumbnailFile(observationId).delete()
-        Unit
+        dao.delete(observationId)
     }
 
     override suspend fun removeAll() = withContext(Dispatchers.IO) {
-        dao.deleteAll()
         root.listFiles()?.forEach { it.delete() }
-        Unit
+        dao.deleteAll()
     }
 
     override suspend fun count(): Int = dao.count()
