@@ -30,7 +30,12 @@ function idToken(payload: Record<string, unknown>): string {
 describe('Hosted UI OAuth callback', () => {
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
     vi.restoreAllMocks();
+    // authService is a module-level singleton that reads storage once, in
+    // its constructor. Clearing storage does not clear what it already
+    // holds, so without this a test inherits the previous test's session.
+    vi.resetModules();
   });
 
   afterEach(() => {
@@ -40,8 +45,11 @@ describe('Hosted UI OAuth callback', () => {
   // Reproduces the reported bug: pressing "Google で続行" lands back on the
   // login screen instead of the dashboard.
   it('exchanges the code and lands on the dashboard, not back on /login', async () => {
-    // Cognito redirects the browser here, to "/" with ?code=.
-    window.history.replaceState({}, '', '/?code=auth-code-123');
+    // Cognito redirects the browser here, to "/" with ?code= and the same
+    // ?state= it was handed at the authorize step.
+    sessionStorage.setItem('edgewatcher_oauth_state', 'state-abc');
+    sessionStorage.setItem('edgewatcher_pkce_verifier', 'verifier-abc');
+    window.history.replaceState({}, '', '/?code=auth-code-123&state=state-abc');
 
     const fetchMock = vi.fn().mockResolvedValue({
       ok: true,
@@ -77,5 +85,37 @@ describe('Hosted UI OAuth callback', () => {
     await waitFor(() => {
       expect(screen.queryByTestId('login-page')).not.toBeInTheDocument();
     });
+  });
+  // The same journey as above, but the code arrives with a state this tab
+  // never issued. The user must end up on the login screen WITH an
+  // explanation — not signed in, and not staring at a screen that looks
+  // like the button did nothing.
+  it('refuses a forged callback and explains itself on the login screen', async () => {
+    sessionStorage.setItem('edgewatcher_oauth_state', 'state-abc');
+    sessionStorage.setItem('edgewatcher_pkce_verifier', 'verifier-abc');
+    window.history.replaceState({}, '', '/?code=attacker-code&state=attacker-state');
+
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+
+    const { AuthProvider } = await import('@/hooks/use-auth');
+    const { AppRoutes } = await import('../index');
+
+    render(
+      <QueryClientProvider client={createTestQueryClient()}>
+        <BrowserRouter>
+          <AuthProvider>
+            <AppRoutes />
+          </AuthProvider>
+        </BrowserRouter>
+      </QueryClientProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByTestId('login-error')).toBeInTheDocument();
+    });
+
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(localStorage.getItem('edgewatcher_auth_tokens')).toBeNull();
   });
 });
