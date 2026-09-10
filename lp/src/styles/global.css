@@ -1,0 +1,397 @@
+/* ==========================================================================
+   EdgeWatcher LP — 製品と同じ紙に刷る。
+   基調は Wheat。文字はインク。indigo は「いま・ここ」だけに使う。
+   状態は色ではなく形(■ / □)で示す。
+   ========================================================================== */
+
+:root {
+  --wheat: #f5deb3;
+  --wheat-deep: #e3cb9b;
+  --paper: #fcf6e8;
+  --ink: #211d17;
+  --ink-soft: #6f6553;
+  --indigo: #2c4a78;
+  --alarm: #8a2b18;
+
+  --mono: "IBM Plex Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+  --sans: "Noto Sans JP", "Hiragino Sans", "Yu Gothic UI", system-ui, sans-serif;
+
+  --rule: 1.5px solid var(--ink);
+  --hairline: 1px solid var(--wheat-deep);
+  --gutter: 7.5rem;
+}
+
+* { box-sizing: border-box; }
+
+html { scroll-behavior: smooth; }
+
+body {
+  margin: 0;
+  background: var(--wheat);
+  color: var(--ink);
+  font-family: var(--sans);
+  font-size: 15px;
+  line-height: 1.85;
+  font-feature-settings: "palt" 1;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html { scroll-behavior: auto; }
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid var(--indigo);
+  outline-offset: 3px;
+}
+
+.mono {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+a { color: inherit; }
+
+/* ---------- 版面 ---------- */
+
+.sheet {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 0 2rem;
+}
+
+/* 各節は、コンタクトシートの1コマ。左の余白に撮影時刻が刷ってある */
+.strip {
+  display: grid;
+  grid-template-columns: var(--gutter) minmax(0, 1fr);
+  gap: 0 2.5rem;
+  border-top: var(--rule);
+  padding: 5.5rem 0;
+}
+
+.strip__stamp {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+  line-height: 1.5;
+  padding-top: 0.65rem;
+  position: sticky;
+  top: 2rem;
+  align-self: start;
+}
+
+.strip__stamp b {
+  display: block;
+  font-weight: 500;
+  font-size: 20px;
+  color: var(--ink);
+  letter-spacing: -0.02em;
+}
+
+.strip__body > :first-child { margin-top: 0; }
+.strip__body > :last-child { margin-bottom: 0; }
+
+h2 {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: clamp(1.55rem, 3.4vw, 2.15rem);
+  line-height: 1.35;
+  letter-spacing: -0.035em;
+  margin: 0 0 1.4rem;
+  max-width: 26ch;
+  word-break: auto-phrase;
+}
+
+h3 {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+  margin: 0 0 0.5rem;
+}
+
+p { max-width: 62ch; margin: 0 0 1.15rem; }
+
+.lede {
+  font-size: 1.06rem;
+  max-width: 56ch;
+}
+
+.dim { color: var(--ink-soft); }
+
+/* ---------- 銘 ---------- */
+
+.mark {
+  width: 22px;
+  height: 22px;
+  background: var(--ink);
+  display: grid;
+  place-items: center;
+  flex: none;
+}
+.mark::after {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--wheat);
+}
+
+.masthead {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 1.5rem 0 1.4rem;
+  border-bottom: var(--rule);
+}
+.masthead__name {
+  font-family: var(--mono);
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  font-size: 0.95rem;
+}
+.masthead__meta {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+
+/* ---------- 見出しの版 ---------- */
+
+.hero {
+  display: grid;
+  grid-template-columns: minmax(0, 0.92fr) minmax(0, 1.08fr);
+  gap: 0 3.5rem;
+  align-items: center;
+  padding: 3rem 0 3.5rem;
+}
+.hero__col { min-width: 0; }
+
+.hero__title {
+  font-family: var(--sans);
+  font-weight: 500;
+  font-size: clamp(2.15rem, 4.4vw, 3.5rem);
+  line-height: 1.24;
+  letter-spacing: -0.045em;
+  margin: 0 0 1.5rem;
+  max-width: 14ch;
+  word-break: auto-phrase;
+}
+
+.hero__lede {
+  font-size: clamp(1rem, 1.7vw, 1.12rem);
+  max-width: 46ch;
+  margin-bottom: 2.2rem;
+}
+
+.hero__facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.35rem 1.75rem;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--ink-soft);
+  border-top: var(--hairline);
+  padding-top: 1rem;
+  max-width: 46ch;
+}
+.hero__facts b { color: var(--ink); font-weight: 500; }
+
+/* ---------- コンタクトシート ---------- */
+
+.contact {
+  background: var(--paper);
+  border: var(--rule);
+  padding: 0.85rem 0.85rem 0.65rem;
+}
+
+.contact__grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 5px;
+}
+
+.frame { position: relative; }
+.frame svg { display: block; width: 100%; height: auto; }
+
+.frame__time {
+  display: block;
+  font-family: var(--mono);
+  font-size: 9px;
+  font-variant-numeric: tabular-nums;
+  color: var(--ink-soft);
+  padding-top: 2px;
+  letter-spacing: -0.02em;
+}
+
+/* 「いま」だけが indigo。走査は読み込み時に一度だけ流れて、最後のコマで止まる */
+.frame::after {
+  content: "";
+  position: absolute;
+  inset: -3px;
+  border: 2px solid var(--indigo);
+  opacity: 0;
+  pointer-events: none;
+}
+.frame.is-now::after { opacity: 1; }
+
+.contact__foot {
+  display: flex;
+  gap: 1.25rem;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-soft);
+  border-top: var(--hairline);
+  margin-top: 0.65rem;
+  padding-top: 0.5rem;
+}
+.contact__foot b { color: var(--ink); font-weight: 500; }
+.contact__foot span:last-child { margin-left: auto; }
+
+@media (max-width: 980px) {
+  .hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 2.75rem;
+    align-items: start;
+  }
+  .hero__title { max-width: 17ch; }
+}
+
+/* ---------- 経路図(インクの版) ---------- */
+
+.plate {
+  background: var(--ink);
+  color: var(--wheat);
+  padding: 2.25rem 2rem;
+  overflow-x: auto;
+}
+.plate pre {
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.75;
+  margin: 0;
+  white-space: pre;
+  color: var(--wheat);
+}
+.plate .hi { color: #fff; font-weight: 500; }
+.plate .lo { color: #9a8f77; }
+
+/* ---------- 部品の三分割 ---------- */
+
+.parts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+  gap: 0;
+  border-left: var(--hairline);
+  margin: 2rem 0 0;
+}
+.part {
+  border-right: var(--hairline);
+  padding: 1.1rem 1.4rem 1.3rem;
+}
+.part__k {
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+  display: block;
+  margin-bottom: 0.35rem;
+}
+.part p { font-size: 13.5px; line-height: 1.75; margin: 0; }
+
+/* ---------- 設計判断 ---------- */
+
+.call {
+  border-top: var(--hairline);
+  padding: 1.5rem 0;
+  display: grid;
+  grid-template-columns: minmax(0, 0.78fr) minmax(0, 1.22fr);
+  gap: 0 2.5rem;
+  align-items: start;
+}
+.call:first-child { border-top: none; padding-top: 0; }
+
+.call__q {
+  font-family: var(--sans);
+  font-size: 0.98rem;
+  font-weight: 500;
+  line-height: 1.55;
+  letter-spacing: -0.02em;
+  margin: 0;
+  max-width: none;
+  word-break: auto-phrase;
+}
+.call__q small {
+  display: block;
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--ink-soft);
+  letter-spacing: 0;
+  margin-top: 0.3rem;
+}
+.call__a { margin: 0; font-size: 14px; line-height: 1.85; max-width: none; }
+.call__a + .call__a { margin-top: 0.7rem; }
+
+@media (max-width: 780px) {
+  .call { grid-template-columns: minmax(0, 1fr); gap: 0.7rem; }
+}
+
+/* ---------- 技術表 ---------- */
+
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13.5px;
+}
+th, td {
+  text-align: left;
+  padding: 0.6rem 1rem 0.6rem 0;
+  border-bottom: var(--hairline);
+  vertical-align: top;
+}
+th {
+  font-family: var(--mono);
+  font-weight: 500;
+  font-size: 11px;
+  color: var(--ink-soft);
+  white-space: nowrap;
+  width: 12rem;
+  padding-top: 0.72rem;
+}
+tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
+td .mono { font-size: 12.5px; }
+
+/* ---------- 締め ---------- */
+
+.colophon {
+  border-top: var(--rule);
+  padding: 2rem 0 3.5rem;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem 2rem;
+  align-items: baseline;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--ink-soft);
+}
+.colophon b { color: var(--ink); font-weight: 500; }
+.colophon a { text-decoration-color: var(--wheat-deep); text-underline-offset: 3px; }
+.colophon a:hover { text-decoration-color: var(--ink); }
+
+@media (max-width: 780px) {
+  :root { --gutter: 4.25rem; }
+  .strip { gap: 0 1.25rem; padding: 3.5rem 0; }
+  .strip__stamp { position: static; }
+  .sheet { padding: 0 1.15rem; }
+  th { width: auto; }
+  table, tbody, tr, th, td { display: block; }
+  th { padding-bottom: 0; border-bottom: none; }
+  td { padding-left: 0; }
+}
