@@ -66,8 +66,13 @@ sealed interface ObservationState {
     /** 直近の送信に成功している。 */
     data class Observing(val lastUploadAt: Instant?) : ObservationState
 
-    /** 送信に失敗し、バッファに滞留している。 */
-    data class Offline(val pendingCount: Int) : ObservationState
+    /**
+     * 送信に失敗し、バッファに滞留している。
+     *
+     * 最終送信時刻も持つのは、待機件数だけでは「ずっと駄目なのか、さっきまでは
+     * 送れていたのか」が区別できないため。オーナーが最初に知りたいのはそこ。
+     */
+    data class Offline(val pendingCount: Int, val lastUploadAt: Instant?) : ObservationState
 
     /** サービスが動いていない。この状態のときだけ [観測を再開] を出す。 */
     data object Stopped : ObservationState

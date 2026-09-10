@@ -64,7 +64,10 @@ class EncryptedCredentialStore(context: Context) : CredentialStore {
     }
 
     override fun clear() {
-        prefs.edit().clear().apply()
+        // **commit で同期的に書く。** ログアウトと失効はここだけが頼りで、apply の
+        // 非同期書き込みだと、直後にプロセスが落ちた場合に資格情報が生き残る。
+        // 生き残ると、消したはずの端末が次の起動で稼働画面に戻ってしまう。
+        prefs.edit().clear().commit()
     }
 
     private companion object {

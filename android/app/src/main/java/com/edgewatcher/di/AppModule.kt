@@ -1,11 +1,13 @@
 package com.edgewatcher.di
 
 import android.content.Context
+import android.os.Build
 import androidx.room.Room
 import com.edgewatcher.BuildConfig
 import com.edgewatcher.domain.port.AlarmScheduler
 import com.edgewatcher.domain.port.CameraGateway
 import com.edgewatcher.domain.port.Clock
+import com.edgewatcher.domain.model.DeviceInfo
 import com.edgewatcher.domain.port.CredentialStore
 import com.edgewatcher.domain.port.IdGenerator
 import com.edgewatcher.domain.port.JpegEncoder
@@ -126,6 +128,19 @@ object AppModule {
     @Provides
     @Singleton
     fun ids(): IdGenerator = UlidIdGenerator()
+
+    /**
+     * 端末が自己申告する情報。ペアリングのときだけ使う表示専用の値で、
+     * 何の認可判断にも関わらない。ここで組み立てるのは、ViewModel から
+     * android.os.Build への依存を外して素の Kotlin として試験できるようにするため。
+     */
+    @Provides
+    @Singleton
+    fun deviceInfo(): DeviceInfo = DeviceInfo(
+        model = Build.MODEL,
+        osVersion = Build.VERSION.RELEASE,
+        appVersion = BuildConfig.APP_VERSION,
+    )
 
     @Provides
     fun pairDevice(api: ObservationApi, store: CredentialStore) =

@@ -8,6 +8,7 @@ import android.content.Context
 import android.content.Intent
 import androidx.core.app.NotificationCompat
 import com.edgewatcher.domain.StatusLine
+import com.edgewatcher.domain.model.IntervalMinutes
 import com.edgewatcher.domain.model.ObservationState
 import com.edgewatcher.presentation.MainActivity
 
@@ -44,15 +45,21 @@ object Notifications {
         )
     }
 
-    fun ongoing(context: Context, state: ObservationState): Notification =
+    fun ongoing(
+        context: Context,
+        state: ObservationState,
+        interval: IntervalMinutes,
+    ): Notification = StatusLine.of(state, interval).let { line ->
         NotificationCompat.Builder(context, CHANNEL_RUNNING)
-            .setContentTitle("EdgeWatcher")
-            .setContentText(StatusLine.render(state))
+            // モックの通知は「アプリ名 / 状態 / 詳細」の3段。状態を題に置く。
+            .setContentTitle(line.title)
+            .setContentText(line.detail)
             .setSmallIcon(android.R.drawable.ic_menu_camera)
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setContentIntent(openApp(context))
             .build()
+    }
 
     /**
      * Android 14 以降は BOOT_COMPLETED から camera 型の FGS を開始できないため、

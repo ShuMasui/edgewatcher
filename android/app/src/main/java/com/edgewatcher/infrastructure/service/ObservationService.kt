@@ -11,6 +11,7 @@ import android.os.PowerManager
 import androidx.camera.core.Preview
 import androidx.lifecycle.LifecycleService
 import androidx.lifecycle.lifecycleScope
+import com.edgewatcher.domain.model.IntervalMinutes
 import com.edgewatcher.domain.model.ObservationState
 import com.edgewatcher.domain.port.AlarmScheduler
 import com.edgewatcher.domain.port.Clock
@@ -67,6 +68,9 @@ class ObservationService : LifecycleService() {
     inner class LocalBinder : Binder() {
         val state: StateFlow<ObservationState> get() = _state.asStateFlow()
 
+        /** 状態行の「5分間隔」を出すために画面が読む。 */
+        val interval: IntervalMinutes get() = store.readInterval()
+
         /** プレビュー ON。ImageCapture は bind されたままなので送信は止まらない。 */
         fun attachPreview(surfaceProvider: Preview.SurfaceProvider) =
             camera.attachPreview(surfaceProvider)
@@ -82,7 +86,7 @@ class ObservationService : LifecycleService() {
     override fun onCreate() {
         super.onCreate()
         Notifications.ensureChannels(this)
-        startForegroundWith(Notifications.ongoing(this, _state.value))
+        startForegroundWith(Notifications.ongoing(this, _state.value, store.readInterval()))
         acquireWakeLock()
         lifecycleScope.launch {
             camera.bindTo(this@ObservationService)
@@ -107,14 +111,34 @@ class ObservationService : LifecycleService() {
         super.onDestroy()
     }
 
+    /** drainQueue がこの周期をどう終えたか。 */
+    private enum class Drain { Done, Revoked }
+
     /**
      * 1周期。撮ってから、送れるだけ送り、次のアラームを置く。
      *
      * Mutex で囲うのは、アラームと手動再開が重なったときに二重に撮らないため。
      */
     private suspend fun runCycle() = cycle.withLock {
+        // **資格情報が無いなら1枚も撮らない。** 撮ってから気づくと、送れない画像が
+        // バッファに積まれ続け、次にペアリングした瞬間にその全部が一度に送られる。
+        // ログアウト直後や失効直後にここへ来ることが実際にある。
+        if (store.readCredentials() == null) {
+            alarms.cancel()
+            stopSelf()
+            return@withLock
+        }
+
         capture()
-        drainQueue()
+
+        if (drainQueue() == Drain.Revoked) {
+            // 失効した端末に次の撮影を予約しない。予約すると、アラームがサービスを
+            // 起こし直し、起きるたびに1枚撮って積むだけの往復になる。
+            alarms.cancel()
+            stopSelf()
+            return@withLock
+        }
+
         scheduleNext()
         publishState()
     }
@@ -127,7 +151,7 @@ class ObservationService : LifecycleService() {
      * 発火しない）。次の撮影時刻を追い越さないよう、累計が撮影間隔に達したら諦めて
      * アラームに任せる。
      */
-    private suspend fun drainQueue() {
+    private suspend fun drainQueue(): Drain {
         val intervalSeconds = store.readInterval().minutes * 60L
         var spent = 0L
         while (true) {
@@ -139,21 +163,20 @@ class ObservationService : LifecycleService() {
 
                 UploadNextObservationUseCase.Outcome.Empty -> {
                     consecutiveFailures = 0
-                    return
+                    return Drain.Done
                 }
 
                 UploadNextObservationUseCase.Outcome.Deferred -> {
                     consecutiveFailures += 1
                     val wait = backoffSeconds()
-                    if (spent + wait >= intervalSeconds) return
+                    if (spent + wait >= intervalSeconds) return Drain.Done
                     spent += wait
                     delay(wait * 1000L)
                 }
 
                 UploadNextObservationUseCase.Outcome.Revoked -> {
                     _revoked.tryEmit(Unit)
-                    stopSelf()
-                    return
+                    return Drain.Revoked
                 }
             }
         }
@@ -185,11 +208,11 @@ class ObservationService : LifecycleService() {
     private suspend fun publishState() {
         val pending = buffer.count()
         _state.value = if (pending > 0) {
-            ObservationState.Offline(pending)
+            ObservationState.Offline(pending, lastUploadAt)
         } else {
             ObservationState.Observing(lastUploadAt)
         }
-        startForegroundWith(Notifications.ongoing(this, _state.value))
+        startForegroundWith(Notifications.ongoing(this, _state.value, store.readInterval()))
     }
 
     private fun startForegroundWith(notification: Notification) {
