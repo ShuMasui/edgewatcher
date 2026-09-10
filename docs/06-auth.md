@@ -125,6 +125,7 @@ POST /device/logout  Authorization: <sessionToken> → 204
 bcrypt や Argon2 のような遅いハッシュが必要なのは、人間が選んだ低エントロピーのパスワードを
 オフライン総当たりから守るため。256bit の乱数に対しては総当たりが成立しないため、
 Lambda のコールドスタートに KDF のコストを乗せる意味がない。
+保存する `sessionTokenHash`(および `deviceSecretHash`)は、SHA-256 ダイジェストを小文字16進数文字列にエンコードしたものとする。
 
 ### セッションは端末につき1本、交換のたびにローテーション
 

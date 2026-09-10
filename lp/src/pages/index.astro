@@ -1,0 +1,221 @@
+---
+import Base from "../layouts/Base.astro";
+import ContactSheet from "../components/ContactSheet.astro";
+
+/** 経路図。インクの版に刷った1枚の図として扱う */
+const diagramSource = [
+  "DEVICE                             AWS                                 OWNER",
+  "",
+  "Android app (Kotlin)               API Gateway (HTTP API)              Web app (React / Vite)",
+  "  Foreground Service                 |                                   S3 + CloudFront (OAC)",
+  "  + WakeLock + AlarmManager          +-- authorizer    session          |",
+  "  every 5 / 10 / 15 min              +-- device-auth   pairing          |",
+  "        |                            +-- device-api    upload           |",
+  "        |   image + location         +-- web-api  <-------- JWT --------+",
+  "        +---------------------------->      |",
+  "                                            +--> S3         images, private",
+  "                                            +--> DynamoDB   single table",
+  "                                            +--> Cognito    Web User Pool / Google SSO",
+  "",
+  "Terraform --- every resource above, in both dev and prod",
+].join("\n");
+
+/** 図の桁を崩さないため、整形が済んだ文字列に対してだけ色を後付けする */
+const STRONG = ["Android app", "API Gateway", "Web app", "authorizer", "device-auth",
+  "device-api", "web-api", "DynamoDB", "Cognito", "Terraform", "S3 "];
+const FAINT = ["DEVICE", "AWS", "OWNER", "session", "pairing", "upload",
+  "images, private", "single table", "Web User Pool / Google SSO",
+  "every resource above, in both dev and prod"];
+
+const diagram = diagramSource
+  .replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[c]!)
+  .replace(new RegExp(`(${STRONG.join("|")})`, "g"), '<span class="hi">$1</span>')
+  .replace(new RegExp(`(${FAINT.join("|")})`, "g"), '<span class="lo">$1</span>');
+
+
+const calls = [
+  {
+    q: "定期実行に WorkManager を使わない",
+    sub: "端末 / タイマー",
+    a: [
+      "<code class=\"mono\">PeriodicWorkRequest</code> は OS 側の制約で最短 15 分。5 分間隔の観測が作れない。常時給電の専用機として置く前提なので、Foreground Service と自前のタイマーに寄せ、常駐通知が出ることは許容する。",
+      "ただし Foreground Service だけでは足りない。CPU のサスペンドを妨げないため、画面 OFF 中にタイマーが止まる。ウェイクロックと <code class=\"mono\">AlarmManager</code> を併用して初めて成立する。",
+    ],
+  },
+  {
+    q: "端末用の Cognito User Pool は作らない",
+    sub: "認証",
+    a: [
+      "当初は端末側にも User Pool を置き、<code class=\"mono\">CUSTOM_AUTH</code> でパスワードレス認証をする設計だった。だが Lambda Authorizer が毎リクエスト DynamoDB を引いて端末の有効性を確かめる以上、セッションの寿命管理はすでに DynamoDB 側にある。",
+      "Cognito に残るのは JWT の署名だけ。その対価が User Pool ひとつ分の管理、認証トリガー3本、ペアリング未完了時に残る孤児ユーザーでは釣り合わない。端末認証は自前のデバイスシークレットで完結させ、Cognito はオーナーの Google SSO に限定した。",
+    ],
+  },
+  {
+    q: "QR は5分で消える。OTP は足さない",
+    sub: "ペアリング",
+    a: [
+      "端末の追加は <code class=\"mono\">TransactWriteItems</code> 1コールで、Device(PENDING)と使い捨ての PairingSession を同時に書く。スキャン時も1コールで、「PENDING かつ未期限」を条件に CONSUMED へ倒しながら Device を PAIRED にする。条件が外れれば片方だけ書かれることがない。",
+      "この QR は、オーナーが目の前の端末をセットアップしている5分間しか存在しない。先に第三者がスキャンしていればオーナー自身のペアリングが失敗して異常に気づけるため、二段階の確認は置いていない。",
+    ],
+  },
+  {
+    q: "deviceId はスキャンより先に決める",
+    sub: "端末の同一性",
+    a: [
+      "Device レコードはペアリング開始の時点で作り、<code class=\"mono\">deviceId</code> は以後変えない。端末を初期化しても、別の Android に置き換えても、再ペアリングすれば同じ観測地点として過去の画像履歴が繋がる。",
+      "型番の揃わない寄せ集めを前提にする以上、機体ではなく「置いた場所」に同一性を持たせる必要があった。",
+    ],
+  },
+  {
+    q: "削除しても、すぐには消さない",
+    sub: "ライフサイクル",
+    a: [
+      "1端末あたり保持期間内の観測レコードは最大 288 件 × 日数。<code class=\"mono\">DELETE</code> のリクエストの中で消しきるのは現実的でないため、論理削除にして <code class=\"mono\">status = ARCHIVED</code> へ倒し、資格情報を失効させる。実体の削除は後日まとめて行う。",
+      "それでも切断は即座に効く。Authorizer が毎リクエスト Device の <code class=\"mono\">status</code> を見るので、有効期限の残ったセッショントークンでもその瞬間から拒否される。端末は 401 を受けると自分の資格情報を捨てて未ペアリング画面に戻る。",
+    ],
+  },
+  {
+    q: "設定は端末に置かず、応答に相乗りさせる",
+    sub: "設定配信",
+    a: [
+      "屋外に固定した端末を操作するには、物理的にそこへ行くしかない。端末でしか変えられない設定があると運用が止まるので、端末側に設定画面を持たせない。",
+      "配信は Pull 型。定期アップロードのレスポンスに次回までの設定値を同梱する。AWS IoT Core のような新しいリソースを足さずに済み、代わりに反映が最大1送信サイクル遅れる。",
+    ],
+  },
+  {
+    q: "環境は2つ。インフラは自動で流さない",
+    sub: "運用",
+    a: [
+      "個人開発でリリース列は1本しかなく、stg 本来の役割は dev がそのまま兼ねられる。1環境あたり Cognito・DynamoDB・S3×2・API Gateway・CloudFront・ACM が要る構成では、環境をひとつ減らす効果が大きい。",
+      "アプリコードは develop へのマージで dev に自動デプロイする。一方 Terraform は手動実行に留める。Cognito User Pool のようなステートフルなリソースは属性変更で置換され、登録済みのユーザーと端末が消えるため、plan を読まずに apply が走る状態を作らない。",
+    ],
+  },
+];
+
+const stack = [
+  ["観測デバイス", "Kotlin / CameraX / Foreground Service + WakeLock + AlarmManager。オフライン時は件数と容量に上限を置いてローカルに溜め、復旧後に最新から送る"],
+  ["API", "API Gateway(HTTP API)+ Lambda(Go)。認可の境界で <code class=\"mono\">web-api</code> / <code class=\"mono\">device-auth</code> / <code class=\"mono\">device-api</code> / <code class=\"mono\">authorizer</code> の4関数に分け、IAM を関数ごとに最小化する"],
+  ["データ", "DynamoDB シングルテーブル。TTL で観測レコードを自動失効(dev 1日 / prod 7日)"],
+  ["画像", "S3(非公開)。Web へは署名付き URL でのみ渡し、ライフサイクルルールで同じ日数で削除する"],
+  ["認証", "オーナーは Cognito Web User Pool の Google SSO。端末はデバイスシークレット + 短命のセッショントークンを Lambda Authorizer で検証"],
+  ["Web", "React(Vite)の SPA。S3 + CloudFront(OAC)+ ACM + Route53"],
+  ["基盤", "Terraform。state を bootstrap / shared / envs の3層に分離し、リソース名は <code class=\"mono\">edgewatcher-&lt;env&gt;-&lt;name&gt;</code> で統一する"],
+  ["配信", "Web と Lambda は GitHub Actions(OIDC)。Android は Google Play の限定配信"],
+];
+---
+
+<Base
+  title="EdgeWatcher — 余った Android を、定点観測所にする"
+  description="使わなくなった Android 端末を屋外の定点観測デバイスとして再利用する、個人開発のフルスタックプロジェクト。Kotlin / Go on Lambda / React / Terraform の設計判断を公開しています。"
+>
+  <div class="sheet">
+    <header class="masthead">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="masthead__name">EdgeWatcher</span>
+      <span class="masthead__meta">個人開発 / 設計中</span>
+    </header>
+
+    <section class="hero">
+      <div class="hero__col">
+        <h1 class="hero__title">使わなくなった Android を、定点観測所にする。</h1>
+        <p class="hero__lede">
+          引き出しに眠っている端末には、カメラと GPS と通信と電源管理がひとつの筐体に収まっている。
+          屋外に固定して電源を挿せば、それはもう観測装置として足りている。EdgeWatcher は、
+          寄せ集めの Android を観測地点として登録し、送られてくる画像を1枚のシートで見続けるための仕組み。
+        </p>
+        <p class="hero__facts">
+          <span><b>Kotlin</b> 端末</span>
+          <span><b>Go</b> API</span>
+          <span><b>React</b> 閲覧</span>
+          <span><b>Terraform</b> 基盤</span>
+        </p>
+      </div>
+      <div class="hero__col">
+        <ContactSheet />
+      </div>
+    </section>
+
+    <section class="strip">
+      <p class="strip__stamp"><b>コンセプト</b>型番は揃わない</p>
+      <div class="strip__body">
+        <h2>置いた場所が観測地点で、機体はいつでも入れ替わる。</h2>
+        <p class="lede">
+          余剰端末や格安端末の寄せ集めで組む以上、同じ型番を並べることはできない。
+          だから EdgeWatcher は端末の機種を前提にしない。QR をスキャンすれば観測地点がひとつ増え、
+          壊れた端末を別の機体に置き換えても、再ペアリングすれば履歴はそのまま続く。
+        </p>
+        <div class="parts">
+          <div class="part">
+            <span class="part__k">端末アプリ</span>
+            <p>実質2画面しかない。ペアリング前は QR スキャナ、あとは稼働状態と「画角を合わせる」だけ。撮った画像は端末では見せない。</p>
+          </div>
+          <div class="part">
+            <span class="part__k">バックエンド</span>
+            <p>常時起動するサーバは持たない。画像を受けて S3 と DynamoDB に置き、保持期間を過ぎたものは自動で消える。</p>
+          </div>
+          <div class="part">
+            <span class="part__k">Web アプリ</span>
+            <p>最初に出るのは全端末の最新スナップショット。1台を開くと、その地点の1日を遡れる。</p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="strip">
+      <p class="strip__stamp"><b>構成</b>3コンポーネント</p>
+      <div class="strip__body">
+        <h2>画像が通る道と、人が見る道を分ける。</h2>
+        <p>
+          端末からの経路とオーナーからの経路は、認証方法も権限も別物として設計している。
+          画像バケットへの書き込みを持つのは端末側の関数だけで、Web 側は署名付き URL を発行する権限しか持たない。
+        </p>
+        <div class="plate"><pre set:html={diagram}></pre></div>
+      </div>
+    </section>
+
+    <section class="strip">
+      <p class="strip__stamp"><b>設計判断</b>なぜそう作ったか</p>
+      <div class="strip__body">
+        <h2>選ばなかった方の記録。</h2>
+        <p class="lede">
+          このプロジェクトで残す価値があるのは、動いているコードそのものより、
+          その形に落ち着くまでに何を捨てたかのほう。主なものを7つ挙げる。
+        </p>
+        <div style="margin-top:2.5rem">
+          {calls.map((c) => (
+            <article class="call">
+              <h3 class="call__q">{c.q}<small>{c.sub}</small></h3>
+              <div>
+                {c.a.map((t) => <p class="call__a" set:html={t}></p>)}
+              </div>
+            </article>
+          ))}
+        </div>
+      </div>
+    </section>
+
+    <section class="strip">
+      <p class="strip__stamp"><b>技術</b>使っているもの</p>
+      <div class="strip__body">
+        <h2>構成要素の一覧。</h2>
+        <table>
+          <tbody>
+            {stack.map(([k, v]) => (
+              <tr>
+                <th scope="row">{k}</th>
+                <td set:html={v}></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <footer class="colophon">
+      <span class="mark" aria-hidden="true"></span>
+      <span><b>EdgeWatcher</b></span>
+      <span>設計書は <a href="https://github.com/ShuMasui/edgewatcher/tree/main/docs">docs/</a> に置いてあります</span>
+      <span>ポートフォリオとして開発中</span>
+    </footer>
+  </div>
+</Base>

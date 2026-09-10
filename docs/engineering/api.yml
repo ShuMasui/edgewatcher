@@ -1,0 +1,997 @@
+# EdgeWatcher API 契約
+#
+# 最終更新: 2026-09-10
+# ステータス: バックエンド実装(backend/internal/{webapi,deviceauth,deviceapi,authz})と
+#             インフラ(infra/envs/dev/main.tf のルート表)から起こした確定版。
+#
+# 関連: docs/05-backend.md(実装方針)/ docs/06-auth.md(認証)/ docs/04-native.md(端末)
+#       docs/03-web.md(Web)/ docs/engineering/dynamodb.md(データモデル)
+#
+# このファイルの位置づけ
+# ---------------------
+# バックエンドと、その2種類のクライアント(Web / Android 端末)の間の契約である。
+# 実装からの追認ではなく **拘束力のある仕様** として扱う。Go 側のハンドラ、
+# web/src/types/*.ts、Android 実装のいずれかがこれと食い違ったら、それはバグである。
+#
+# Android 実装者がまず読むべき節
+# ------------------------------
+#  1. securitySchemes の deviceSession — ヘッダは "Bearer" を付けない素のトークン
+#  2. POST /device/pair の 404 / 409 の読み分け — 404 だけがリトライ可能
+#  3. "認可レイヤのエラーは本文の形が違う" (下記) — 403 の扱いを間違えると端末が復旧しない
+#  4. POST /device/uploads の multipart パート名と metadata スキーマ
+#
+# 認可レイヤのエラーは本文の形が違う(重要)
+# ------------------------------------------
+# 4xx/5xx の本文は原則 Error スキーマ({"error":{"code","message"}})だが、
+# **API Gateway が Lambda に到達する前に返すエラーだけは例外**で、
+# {"message":"..."} という別の形になる。code フィールドは無い。
+#
+#   - Authorization ヘッダが無い       → 401 {"message":"Unauthorized"}
+#     (identity_sources 宣言により、オーソライザは呼ばれもしない)
+#   - トークンを提示したが拒否された   → 403 {"message":"Forbidden"}
+#   - ペイロードが 10MB を超えた       → 413
+#
+# **端末はセッション切れを 403 で受け取る。401 ではない。**
+# docs/04-native.md §1.9 は「401 を起点とした自己修復」と書いているが、実際に
+# ネットワーク上を流れるのは 403 である(オーソライザが isAuthorized:false を返し、
+# API Gateway がそれを 403 に変換する)。端末は次のように扱うこと:
+#
+#   /device/uploads または /device/logout が 401 または 403
+#     → POST /device/token でセッション再取得を試みる
+#          成功 → 新しい sessionToken で再送
+#          401  → deviceSecret が無効。資格情報を全消去して未ペアリング画面へ
+#
+# 401 と 403 の両方を同じ入口にしておけば、どちらで届いても端末は復帰できる。
+
+openapi: 3.1.0
+
+info:
+  title: EdgeWatcher API
+  version: "1.0.0"
+  description: |
+    定点観測デバイス(Android)から画像を受け取り、Web で閲覧するためのバックエンド API。
+
+    エンドポイントは認可の境界で3群に分かれ、それぞれ別の Lambda 関数が担当する。
+    この分割は性能ではなく権限のためにあり、群をまたいだルート追加はしない。
+
+    | 群 | 認可 | 関数 | 呼び出し元 |
+    | --- | --- | --- | --- |
+    | Web | Cognito JWT オーソライザ | `web-api` | ブラウザ |
+    | 端末(公開) | なし | `device-auth` | Android(ペアリング / トークン取得) |
+    | 端末(認可済) | Lambda オーソライザ | `device-api` | Android(送信 / ログアウト) |
+
+    端末(公開)の2ルートだけがオーソライザの手前にある。ここに到達するリクエストは
+    すべて未認証であり、資格情報が生成・交換される唯一の場所でもある。
+
+servers:
+  - url: https://{apiId}.execute-api.{region}.amazonaws.com
+    description: API Gateway HTTP API($default ステージ。ステージ名はパスに現れない)
+    variables:
+      apiId:
+        default: example123
+      region:
+        default: us-east-1
+
+tags:
+  - name: web
+    description: ブラウザが呼ぶ。Cognito の ID トークンが必要。
+  - name: device-public
+    description: 端末が呼ぶ。認可なし。ペアリングとトークン取得のみ。
+  - name: device
+    description: ペアリング済み端末が呼ぶ。sessionToken が必要。
+
+security:
+  - cognitoJwt: []
+
+paths:
+  # ---------------------------------------------------------------- Web 群
+
+  /app-config:
+    get:
+      tags: [web]
+      operationId: getAppConfig
+      summary: 環境定数を取得する
+      description: |
+        クライアントが画面を組み立てるための定数。`intervalOptions` は
+        PATCH /devices/{id} がサーバ側で受理する値と同一のリストであり、
+        両者が食い違わないよう1か所から配っている。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/AppConfig" }
+              example:
+                retentionDays: 30
+                deviceLimit: 10
+                intervalOptions: [5, 10, 15]
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /devices:
+    get:
+      tags: [web]
+      operationId: listDevices
+      summary: 自分の端末一覧を取得する
+      description: |
+        ARCHIVED の端末は含まれない。各端末の `activePairingSession` は
+        「まだ実際に使える QR」がある場合のみオブジェクトになり、無ければ null。
+        PENDING かつ expiresAt が未来、の両方を満たすものだけが対象。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Device" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    post:
+      tags: [web]
+      operationId: createDevice
+      summary: 端末を作成し、最初の QR を発行する
+      description: |
+        Device 行と PairingSession 行を1トランザクションで作る。端末はまだ存在せず、
+        status は PENDING で始まる。
+
+        同じ PairingSession が応答のトップレベルと `device.activePairingSession` の
+        両方に入る。前者はペアリングモーダルが、後者は一覧の行が読む。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  description: 端末名。前後の空白は除去され、空文字は 400。
+                  example: 玄関
+      responses:
+        "200":
+          description: 作成された
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [device, pairingSession]
+                properties:
+                  device: { $ref: "#/components/schemas/Device" }
+                  pairingSession:
+                    { $ref: "#/components/schemas/PairingSession" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "429":
+          description: |
+            端末数が DEVICE_LIMIT に達している(code: `DEVICE_LIMIT_EXCEEDED`)。
+            PENDING は上限に数えるが、ARCHIVED は数えない。
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /devices/{id}:
+    parameters:
+      - $ref: "#/components/parameters/DeviceIdPath"
+    patch:
+      tags: [web]
+      operationId: updateDevice
+      summary: 端末名 / 送信間隔を変更する
+      description: |
+        PATCH セマンティクス。**送ったフィールドだけが変わる。**
+        `interval` を省略することと `interval: 0` を送ることは別物で、後者は 400 になる
+        (0 を書き込めると端末が二度と送信しなくなる)。
+
+        `interval` の変更が端末に届くのは、次のアップロードの応答 `nextConfig` 経由。
+        サーバから端末へは何も push しないため、最大1送信サイクル遅れる。
+
+        応答は端末の全体像。一覧の行はマージではなく丸ごと置き換える。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              minProperties: 1
+              properties:
+                name:
+                  type: string
+                  example: 裏口
+                interval:
+                  type: integer
+                  description: GET /app-config の intervalOptions のいずれか。それ以外は 400。
+                  example: 10
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Device" }
+        "400":
+          description: |
+            code: `VALIDATION_ERROR`。本文が空 / 変更項目が無い / 端末名が空 /
+            interval が intervalOptions 外。
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/DeviceNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+    delete:
+      tags: [web]
+      operationId: deleteDevice
+      summary: 端末を論理削除する
+      description: |
+        物理削除しない。status を ARCHIVED にし、資格情報を消し、GSI1 の
+        パーティションを ARCHIVED 側へ移すことで一覧と端末数から外す。
+
+        行が残るのは即時失効の保証のため。オーソライザは「存在しないこと」ではなく
+        「status が PAIRED であること」で判定するので、削除された端末は次のリクエストで
+        必ず拒否される。
+
+        本文なし。web/src/services/api-client.ts は `{success:true}` を自前で作っている。
+      responses:
+        "204": { description: 削除された(本文なし) }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/DeviceNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /devices/{id}/pairing-sessions:
+    parameters:
+      - $ref: "#/components/parameters/DeviceIdPath"
+    post:
+      tags: [web]
+      operationId: createPairingSession
+      summary: 既存の端末に QR を再発行する
+      description: |
+        期限切れの QR の再発行、あるいは切断済み端末の再ペアリングに使う。
+
+        **Device 行は作らない。** deviceId は不変であり、それが「端末を交換しても
+        観測履歴が同じ端末に紐づいたままになる」ことを支えている。
+
+        有効期限は発行から5分。
+      responses:
+        "200":
+          description: 発行された(status は必ず PENDING)
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PairingSession" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/DeviceNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /devices/{id}/pairing-sessions/latest:
+    parameters:
+      - $ref: "#/components/parameters/DeviceIdPath"
+    get:
+      tags: [web]
+      operationId: getLatestPairingSession
+      summary: 最新の QR の状態を取得する(ペアリングモーダルのポーリング先)
+      description: |
+        Web が2秒間隔で叩く。**状態を報告するだけで、判定はしない。**
+
+        消費済みのセッションも 200 で返り、クライアントは `status: CONSUMED` を見て
+        モーダルを「接続しました」に切り替える。ここで 409 を返すと、ペアリングが
+        成功したまさにその瞬間に「期限切れです」と表示されてしまう。
+
+        期限切れの判定もクライアント側で行う。すでに `expiresAt` を持っており、
+        時計が進んだことを知るのに往復は要らない。
+
+        一度も QR を発行していない端末は 404(`PAIRING_NOT_FOUND`)。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/PairingSession" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: |
+            code: `PAIRING_NOT_FOUND`(セッションが1つも無い)または
+            `DEVICE_NOT_FOUND`(端末が無い / ARCHIVED)。
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /devices/{id}/disconnect:
+    parameters:
+      - $ref: "#/components/parameters/DeviceIdPath"
+    post:
+      tags: [web]
+      operationId: disconnectDevice
+      summary: 端末の資格情報を失効させる(削除はしない)
+      description: |
+        `deviceSecretHash` と `sessionTokenHash` の **両方** を消す。セッションだけを
+        消しても、端末は手元の deviceSecret で POST /device/token を叩いて数秒で
+        復帰してしまうため、切断が成立しない。
+
+        端末には何も通知されない。端末は次の送信が拒否されたときに気づく。
+
+        応答は Device 全体ではなく2フィールドだけ。この操作が触っていないフィールド
+        (interval やサムネイル)を古い値で上書きさせないため。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, status]
+                properties:
+                  deviceId:
+                    { type: string, example: 01J8Z3K2QW7M9V0N4P5R6T7Y8B }
+                  status: { type: string, enum: [DISCONNECTED] }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/DeviceNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /devices/{id}/observations:
+    parameters:
+      - $ref: "#/components/parameters/DeviceIdPath"
+      - name: date
+        in: query
+        required: false
+        description: |
+          `YYYY-MM-DD`。**JST の暦日**で区切る。省略すると JST の今日。
+
+          省略をエラーにしていないのは、履歴画面が今日から開くうえ、クライアントに
+          日付を計算させるとブラウザのタイムゾーンでの「今日」という2つ目の定義が
+          JST 前提のクエリの前に立ってしまうため。
+        schema: { type: string, pattern: '^\d{4}-\d{2}-\d{2}$' }
+        example: "2026-09-10"
+    get:
+      tags: [web]
+      operationId: listObservations
+      summary: 指定日の観測画像一覧を取得する(新しい順)
+      description: |
+        各要素にはサムネイルの署名付き URL だけが入る。`imageUrl` は空で、
+        本画像が要るときは GET /observations/{id}/image を個別に呼ぶ。
+        一覧の全件に本画像の URL を署名すると、ほとんど開かれない画像に対して
+        1ページ分の有効な資格情報をブラウザへ渡すことになるため。
+
+        観測が無い日は空配列(null ではない)。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/Observation" }
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/DeviceNotFound" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /observations/{id}/image:
+    parameters:
+      - name: id
+        in: path
+        required: true
+        description: observationId(ULID)
+        schema: { type: string }
+      - name: deviceId
+        in: query
+        required: true
+        description: |
+          **必須。** 観測は PK = `DEVICE#<deviceId>` で保持されるため
+          observationId だけでは1件を特定できず、また端末が分からないと
+          所有権チェックの対象が無くなり、任意の認証ユーザに任意の画像を
+          渡す経路になってしまう。
+        schema: { type: string }
+    get:
+      tags: [web]
+      operationId: getObservationImage
+      summary: 本画像の署名付き URL を発行する
+      description: 有効期限は900秒。URL 自体はサーバのログに出さない。
+      responses:
+        "200":
+          description: OK
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [observationId, imageUrl, expiresAt]
+                properties:
+                  observationId: { type: string }
+                  imageUrl: { type: string, format: uri }
+                  expiresAt:
+                    type: integer
+                    format: int64
+                    description: URL の失効時刻(epoch 秒)
+        "400":
+          description: "code: `VALIDATION_ERROR`。deviceId クエリパラメータが無い。"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404":
+          description: "code: `OBSERVATION_NOT_FOUND` または `DEVICE_NOT_FOUND`"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # -------------------------------------------------- 端末(公開)群
+
+  /device/pair:
+    post:
+      tags: [device-public]
+      operationId: devicePair
+      summary: QR のコードを deviceSecret と交換する
+      security: []
+      description: |
+        端末が QR をスキャンした直後に1度だけ呼ぶ。QR のペイロードは
+        `ew1:<pairingCode>` で、`ew1:` を取り除いた残りが `pairingCode`。
+
+        **応答の `deviceSecret` は、システム全体でこれが平文で流れる唯一の場所である。**
+        サーバは SHA-256 しか保持しないため、端末がこれを失った場合は
+        Web から QR を再発行してもう一度ペアリングするしかない。
+        `EncryptedSharedPreferences` に保存すること。
+
+        セッションは1回しか使えない。同時に2台がスキャンしても、成功するのは1台だけ。
+
+        ### 失敗の読み分け(端末の挙動が変わる)
+
+        | status | code | 端末の挙動 |
+        | --- | --- | --- |
+        | 404 | `PAIRING_NOT_FOUND` | **1秒間隔で最大3回リトライする。** |
+        | 409 | `PAIRING_CODE_CONSUMED` | 即座に「この QR は使えません」 |
+        | 409 | `PAIRING_CODE_EXPIRED` | 即座に「この QR の有効期限が切れています」 |
+        | 400 | `VALIDATION_ERROR` | 本文の不備。リトライしない |
+
+        404 だけがリトライ対象なのは、コードの逆引きが結果整合な GSI2 を通るため。
+        発行直後にスキャンすると伝播が間に合わず、**待てば成功する空振り**が起こりうる。
+        これを 409 に丸めると成功するはずのペアリングを諦め、逆に 409 を 404 に丸めると
+        絶対に成功しない QR を延々とリトライすることになる。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [pairingCode]
+              properties:
+                pairingCode:
+                  type: string
+                  description: |
+                    QR ペイロード `ew1:<pairingCode>` の後半。
+                    256bit をパディング無し base32 で符号化した52文字。
+                  example: MZXW6YTBOI5DCMRTGIYTEMZUGU3DGNBVGY3TQOJSGEZDGMBWGI2A
+                deviceInfo:
+                  $ref: "#/components/schemas/DeviceInfo"
+      responses:
+        "200":
+          description: ペアリング成立
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [deviceId, deviceSecret]
+                properties:
+                  deviceId:
+                    type: string
+                    description: ULID。以後 sessionToken の前半としても使われる。
+                    example: 01J8Z3K2QW7M9V0N4P5R6T7Y8B
+                  deviceSecret:
+                    type: string
+                    description: 長期資格情報。base32 52文字。再取得は不可能。
+        "400": { $ref: "#/components/responses/ValidationError" }
+        "404":
+          description: "code: `PAIRING_NOT_FOUND` — **リトライ可能**(GSI2 の伝播待ち)"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "409":
+          description: "code: `PAIRING_CODE_CONSUMED` / `PAIRING_CODE_EXPIRED` — リトライ不能"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /device/token:
+    post:
+      tags: [device-public]
+      operationId: deviceToken
+      summary: deviceSecret をセッショントークンと交換する
+      security: []
+      description: |
+        有効期限は12時間で、交換のたびに新しいトークンへ入れ替わる(ローテーション)。
+        端末は概ね1日2回ここを呼ぶ。日常のアップロードで長期資格情報を晒さないための構造。
+
+        **失敗はすべて 401 である。** 404 も 403 も返らない。docs/06-auth.md §5 は
+        401 を端末の自己修復の唯一の入口と定めており、それ以外の status を返すと
+        端末が自力で回復できない状態に取り残される。副作用として、未認証の呼び出し元は
+        「そんな端末は無い」と「secret が違う」を区別できず、deviceId を総当たりで
+        探索することもできない。
+
+        401 が返る条件: 端末が存在しない / status が PAIRED でない(切断・削除・未ペアリング)/
+        deviceSecret が一致しない。**いずれも「Web 側で切断または削除された」を意味しうる**ので、
+        端末はローカルの資格情報を全消去して未ペアリング画面へ戻り、理由を表示すること。
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [deviceId, deviceSecret]
+              properties:
+                deviceId: { type: string, example: 01J8Z3K2QW7M9V0N4P5R6T7Y8B }
+                deviceSecret: { type: string }
+      responses:
+        "200":
+          description: セッション発行
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [sessionToken, expiresAt]
+                properties:
+                  sessionToken:
+                    type: string
+                    description: |
+                      `<deviceId>.<128bit の base32>` という形。deviceId が前半に
+                      入っているのは装飾ではなく、オーソライザが GetItem 1回で
+                      端末を解決するための構造。区切りの "." は他の資格情報の
+                      文字集合(base32)に現れないので、境界が曖昧になることはない。
+                    example: 01J8Z3K2QW7M9V0N4P5R6T7Y8B.KRUGKIDROVUWG2ZAMJZG653O
+                  expiresAt:
+                    type: integer
+                    format: int64
+                    description: 失効時刻(epoch 秒)。発行から12時間。
+        "400":
+          description: "code: `VALIDATION_ERROR`。deviceId / deviceSecret が空。"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401":
+          description: |
+            code: `UNAUTHORIZED`。資格情報が無効。**端末は資格情報を破棄して
+            未ペアリング画面へ戻る。**
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  # ---------------------------------------------- 端末(認可済)群
+
+  /device/uploads:
+    post:
+      tags: [device]
+      operationId: deviceUpload
+      summary: 観測1件(本画像 + サムネイル + メタデータ)を送信する
+      security:
+        - deviceSession: []
+      description: |
+        本画像とサムネイルを **同一リクエスト** で送る。
+
+        ### 冪等性
+        `observationId` は **端末が採番する ULID**(採番時刻は `capturedAt`)。
+        応答を受け取れずにリトライしても記録は1件に保たれるので、
+        **同じ observationId で安全に再送してよい。**
+
+        ### サイズ上限
+        合計 4,500,000 バイト。超過は 400 で、リトライしても永久に通らない。
+        API Gateway 自身の 10MB を超えた場合はさらに手前で 413 になる。
+        **どちらもリトライ不能な失敗として扱い、バッファから捨てること。**
+
+        上限が 4.5MB なのは、Lambda の同期呼び出しペイロードが 6MB で、
+        API Gateway が本文を base64 化する際に約1.33倍に膨らむため。
+
+        ### 端末 ID の出所
+        保存先のキーは **オーソライザが確定した deviceId** から作られる。
+        metadata に deviceId を入れても無視される(そもそもサーバ側の構造体に
+        フィールドが無い)。認証済みであることと、他人の端末の履歴へ書き込んで
+        よいことは別だからである。
+
+        ### 4xx はすべてリトライ不能
+        本文に起因する失敗はすべて 400 を返す。5xx を返すと端末は指数バックオフで
+        同じフレームを永久に再送し続けてしまう。400 は「そのフレームを捨てて次へ進め」の意味。
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [image, thumbnail, metadata]
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: 本画像(JPEG)。空パートは 400。
+                thumbnail:
+                  type: string
+                  format: binary
+                  description: サムネイル(JPEG、長辺160px)。空パートは 400。
+                metadata:
+                  $ref: "#/components/schemas/UploadMetadata"
+            encoding:
+              image: { contentType: image/jpeg }
+              thumbnail: { contentType: image/jpeg }
+              metadata: { contentType: application/json }
+      responses:
+        "200":
+          description: |
+            保存された。**応答の nextConfig を必ず適用すること。**
+            サーバは設定を push しないため、送信間隔の変更がオーナーから端末へ
+            届く経路はこれ1本しかない。
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [nextConfig]
+                properties:
+                  nextConfig:
+                    type: object
+                    required: [intervalMinutes]
+                    properties:
+                      intervalMinutes:
+                        type: integer
+                        enum: [5, 10, 15]
+                        example: 10
+        "400":
+          description: |
+            code: `VALIDATION_ERROR`。パート欠落 / 空パート / metadata が不正 /
+            observationId・capturedAt が無い / capturedAt が ISO 8601 でない /
+            サイズ超過。**いずれもリトライ不能。フレームを捨てる。**
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "413":
+          description: |
+            API Gateway のペイロード上限(10MB)超過。本文の形は Error ではない。
+            **リトライ不能。バッファから捨てる。**
+        "500": { $ref: "#/components/responses/InternalError" }
+
+  /device/logout:
+    post:
+      tags: [device]
+      operationId: deviceLogout
+      summary: 端末自身の資格情報を失効させる
+      security:
+        - deviceSession: []
+      description: |
+        `deviceSecret` と `sessionToken` の両方をサーバ側で消し、status を
+        DISCONNECTED にする。対象は **認可された端末自身** であり、本文で
+        他の端末を指名することはできない(できると、任意の端末が他の端末を
+        切断できてしまう)。
+
+        端末側では確認ダイアログを挟むこと。復帰には Web からの QR 再発行と
+        端末への物理的な操作が要るため、Web のログアウトとは取り返しやすさが違う。
+
+        本文なし。
+      responses:
+        "204": { description: 切断された(本文なし) }
+        "401": { $ref: "#/components/responses/GatewayUnauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "500": { $ref: "#/components/responses/InternalError" }
+
+components:
+  securitySchemes:
+    cognitoJwt:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: |
+        Cognito User Pool が発行した **ID トークン** を `Authorization: Bearer <token>`
+        で送る。検証は API Gateway の JWT オーソライザが行い、Lambda は署名を
+        再検証しない。ハンドラは `sub` を ownerId として受け取る。
+
+        JWT が有効であることは「誰が呼んでいるか」の証明でしかない。
+        「何を見てよいか」は各ハンドラの所有権チェックが別に行う。
+
+    deviceSession:
+      type: apiKey
+      in: header
+      name: Authorization
+      description: |
+        **`Bearer` を付けない素のトークンを送る。**
+
+            Authorization: 01J8Z3K2QW7M9V0N4P5R6T7Y8B.KRUGKIDROVUWG2ZAMJZG653O
+
+        `Bearer ` が付いていてもサーバは剥がして受理するが、仕様は素のトークンである。
+
+        Lambda オーソライザがリクエストごとに DynamoDB を強整合で読み、キャッシュは
+        一切しない(TTL=0)。したがって Web からの切断・削除は、**その端末の次の
+        リクエストで即座に効く。**
+
+        許可の条件はすべて満たす必要がある:
+          1. ヘッダが存在し、空でない
+          2. トークン前半の deviceId が端末に解決できる
+          3. その端末の status が厳密に PAIRED
+          4. トークンのハッシュが一致する
+          5. セッションが失効していない
+
+        いずれかを外すと 403(本文は `{"message":"Forbidden"}`)。
+        ヘッダそのものが無い場合はオーソライザが呼ばれず 401
+        (`{"message":"Unauthorized"}`)。
+
+  parameters:
+    DeviceIdPath:
+      name: id
+      in: path
+      required: true
+      description: deviceId(ULID)
+      schema: { type: string }
+      example: 01J8Z3K2QW7M9V0N4P5R6T7Y8B
+
+  responses:
+    ValidationError:
+      description: "code: `VALIDATION_ERROR`。本文が空 / JSON として不正 / 必須項目の欠落。"
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    Forbidden:
+      description: |
+        Web ルートでは他人の端末を触ろうとした場合(code: `FORBIDDEN`、Error スキーマ)。
+
+        端末ルートではオーソライザが拒否した場合で、**本文は Error スキーマではなく
+        `{"message":"Forbidden"}`**。端末はこれをセッション切れとみなし、
+        POST /device/token で再取得を試みること。
+      content:
+        application/json:
+          schema:
+            oneOf:
+              - $ref: "#/components/schemas/Error"
+              - $ref: "#/components/schemas/GatewayError"
+
+    DeviceNotFound:
+      description: |
+        code: `DEVICE_NOT_FOUND`。端末が存在しない、または ARCHIVED。
+
+        ARCHIVED を 403 ではなく 404 にしているのは、所有者本人が削除したものだから。
+        論理削除がリクエストに応答し続けるなら、削除していないのと区別がつかない。
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+    GatewayUnauthorized:
+      description: |
+        認証情報が無い、または JWT が不正。**API Gateway が Lambda に到達する前に
+        返すため、本文は Error スキーマではなく `{"message":"Unauthorized"}`。**
+
+        端末ルートでは identity_sources の宣言により、Authorization ヘッダが
+        無いだけでオーソライザは呼ばれずにここへ落ちる。
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/GatewayError" }
+
+    InternalError:
+      description: |
+        code: `INTERNAL_ERROR`(または、ルート表と Go のルータが食い違っている場合に
+        `ROUTE_NOT_WIRED`)。原因の詳細は本文に載らず、ログにのみ残る。
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      description: |
+        **アプリケーションが返すすべてのエラーの形。** クライアントは `code` で分岐し、
+        `message` はそのまま表示できる日本語。
+
+        API Gateway 自身が返すエラー(401 / 403 / 413)はこの形ではない。GatewayError を参照。
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code: { $ref: "#/components/schemas/ErrorCode" }
+            message: { type: string, example: 端末が見つかりません }
+
+    ErrorCode:
+      type: string
+      description: |
+        | code | status | 意味 |
+        | --- | --- | --- |
+        | `VALIDATION_ERROR` | 400 | 本文・パラメータの不備。リトライ不能 |
+        | `UNAUTHORIZED` | 401 | 資格情報が無効(POST /device/token のみ) |
+        | `FORBIDDEN` | 403 | 他人の端末 |
+        | `DEVICE_NOT_FOUND` | 404 | 端末が無い / ARCHIVED |
+        | `OBSERVATION_NOT_FOUND` | 404 | 観測が無い |
+        | `PAIRING_NOT_FOUND` | 404 | QR が引けない。**端末はリトライしてよい** |
+        | `PAIRING_CODE_EXPIRED` | 409 | QR の期限切れ |
+        | `PAIRING_CODE_CONSUMED` | 409 | QR は使用済み |
+        | `DEVICE_LIMIT_EXCEEDED` | 429 | 端末数の上限 |
+        | `INTERNAL_ERROR` | 500 | サーバ側の障害 |
+        | `ROUTE_NOT_WIRED` | 500 | ルート表と実装の不一致(デプロイのバグ) |
+      enum:
+        - VALIDATION_ERROR
+        - UNAUTHORIZED
+        - FORBIDDEN
+        - DEVICE_NOT_FOUND
+        - OBSERVATION_NOT_FOUND
+        - PAIRING_NOT_FOUND
+        - PAIRING_CODE_EXPIRED
+        - PAIRING_CODE_CONSUMED
+        - DEVICE_LIMIT_EXCEEDED
+        - INTERNAL_ERROR
+        - ROUTE_NOT_WIRED
+
+    GatewayError:
+      type: object
+      description: |
+        API Gateway が Lambda を呼ぶ前に返すエラーの形。`code` は無い。
+        401 / 403 / 413 でこれが来る。
+      required: [message]
+      properties:
+        message:
+          type: string
+          enum: [Unauthorized, Forbidden]
+
+    AppConfig:
+      type: object
+      required: [retentionDays, deviceLimit, intervalOptions]
+      properties:
+        retentionDays:
+          type: integer
+          description: 観測データの保持日数。TTL は capturedAt を基準に決まる。
+        deviceLimit:
+          type: integer
+          description: 1オーナーが持てる端末数の上限。
+        intervalOptions:
+          type: array
+          items: { type: integer }
+          description: 選択できる送信間隔(分)。PATCH /devices/{id} が受理する値と同一。
+
+    DeviceRawStatus:
+      type: string
+      description: |
+        | 値 | 意味 |
+        | --- | --- |
+        | `PENDING` | 作成済み。まだ QR がスキャンされていない |
+        | `PAIRED` | 稼働中。**端末ルートを通せるのはこの状態だけ** |
+        | `DISCONNECTED` | Web から切断された、または端末がログアウトした |
+        | `ARCHIVED` | 論理削除済み。一覧にも端末数にも現れない |
+      enum: [PENDING, PAIRED, DISCONNECTED, ARCHIVED]
+
+    PairingSession:
+      type: object
+      description: |
+        QR 1枚分のセッション。有効期限は発行から5分。使い捨てで、消費は
+        条件付きトランザクションで担保されている。
+      required: [pairingCode, expiresAt, status]
+      properties:
+        pairingCode:
+          type: string
+          description: |
+            QR に埋める値。ペイロードは `ew1:<pairingCode>`。
+            256bit をパディング無し base32 で符号化した52文字(QR の英数字モードに収まる)。
+
+            **これは有効期限まで生きた資格情報である。ログに出してはならない。**
+        expiresAt:
+          type: integer
+          format: int64
+          description: 失効時刻(epoch 秒)。
+        status: { type: string, enum: [PENDING, CONSUMED] }
+        createdAt: { type: string, format: date-time }
+        consumedAt: { type: string, format: date-time }
+
+    DeviceInfo:
+      type: object
+      description: |
+        端末が自己申告する情報。システム内でこれが与えられるのはペアリング時だけで、
+        表示専用として保存される。**何の認可判断にも使われない。**
+      properties:
+        model: { type: string, example: Pixel 6a }
+        osVersion: { type: string, example: "14" }
+        appVersion: { type: string, example: 1.0.0 }
+
+    Device:
+      type: object
+      required:
+        [deviceId, ownerId, name, status, interval, activePairingSession]
+      properties:
+        deviceId: { type: string, example: 01J8Z3K2QW7M9V0N4P5R6T7Y8B }
+        ownerId: { type: string, description: Cognito の sub }
+        name: { type: string, example: 玄関 }
+        status: { $ref: "#/components/schemas/DeviceRawStatus" }
+        interval:
+          type: integer
+          description: 送信間隔(分)。
+        lastReceivedAt:
+          type: string
+          format: date-time
+          description: サーバが最後にアップロードを受け取った時刻。「応答なし」の判定に使う。
+        latestThumbnailUrl:
+          type: string
+          format: uri
+          description: 直近サムネイルの署名付き URL。一度も送信が無ければフィールドごと省略される。
+        latestCapturedAt:
+          type: string
+          format: date-time
+          description: 直近の**撮影**時刻(端末の時計)。lastReceivedAt とは別物。
+        createdAt: { type: string, format: date-time }
+        archivedAt: { type: string, format: date-time }
+        activePairingSession:
+          description: |
+            **このフィールドだけは常に現れる**(オブジェクト、または明示的な null)。
+            他の任意フィールドは値が無ければ省略される。
+
+            この非対称は意図的で、ダッシュボードは「ペアリング待ち」と「接続中」を
+            この値で切り替える。応答をキャッシュへマージするクライアントにとって
+            「フィールドが無い」は「サーバが何も言わなかった」を意味するので、
+            「QR はもう無い」を表す null と区別できなければならない。
+
+            オブジェクトになるのは PENDING かつ未失効のときだけ。
+          oneOf:
+            - $ref: "#/components/schemas/PairingSession"
+            - type: "null"
+
+    Observation:
+      type: object
+      required: [observationId, deviceId, capturedAt, thumbnailUrl]
+      properties:
+        observationId:
+          type: string
+          description: 端末が採番した ULID。冪等性の鍵。
+        deviceId: { type: string }
+        capturedAt:
+          type: string
+          format: date-time
+          description: 撮影時刻(ISO 8601)。並び順と TTL の基準。
+        thumbnailUrl:
+          { type: string, format: uri, description: 署名付き URL(900秒) }
+        imageUrl:
+          type: string
+          format: uri
+          description: |
+            本画像の署名付き URL。**一覧では常に省略される。**
+            GET /observations/{id}/image を個別に呼んだときだけ得られる。
+        lat: { type: number, format: double }
+        lng: { type: number, format: double }
+        expiresAt:
+          type: integer
+          format: int64
+          description: レコードの TTL(epoch 秒)。capturedAt を基準に決まる。
+
+    UploadMetadata:
+      type: object
+      description: |
+        multipart の `metadata` パート(JSON)。
+
+        **deviceId は含めない。** 含めてもサーバは読まない。端末の同一性は
+        オーソライザだけが決める。
+      required: [observationId, capturedAt]
+      properties:
+        observationId:
+          type: string
+          description: |
+            端末が採番する ULID。**採番時刻は capturedAt に合わせること。**
+            サーバは日別クエリの範囲を ULID のタイムスタンプ部から導くため、
+            ここがずれると観測が別の日に並ぶ。
+          example: 01J8Z3K2QW7M9V0N4P5R6T7Y8B
+        capturedAt:
+          type: string
+          format: date-time
+          description: ISO 8601(RFC 3339)。パースできなければ 400。
+          example: "2026-09-10T14:32:05+09:00"
+        lat:
+          type: number
+          format: double
+          description: 最後の既知位置。測位を待つ必要はない。
+          example: 35.681236
+        lng:
+          type: number
+          format: double
+          example: 139.767125

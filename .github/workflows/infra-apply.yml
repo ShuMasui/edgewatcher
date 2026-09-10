@@ -1,0 +1,125 @@
+# Terraform の plan / apply (docs/02-infra.md §8)。
+#
+# `workflow_dispatch` だけを起点にする。push で apply しないのは、
+# インフラの変更は「plan を人間が読んでから適用する」ものであり、
+# マージのついでに走ってよい種類の操作ではないためである
+# (docs/00-overview.md §8)。CI から適用できるようにしたのは、
+# Google OAuth のクライアントシークレットを Secrets Manager に置き、
+# 手元に AWS の資格情報を持たない人でも apply できるようにするため。
+#
+# 想定する使い方(infra/README.md Phase 2):
+#   1. google_idp_enabled = false のまま apply → Secrets Manager の入れ物ができる
+#   2. aws secretsmanager put-secret-value で値を投入(人間が一度だけ)
+#   3. tfvars で google_idp_enabled = true にして apply → Google IdP が立つ
+name: infra-apply
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: "対象の環境"
+        type: choice
+        options: [dev, prod]
+        default: dev
+      action:
+        description: "plan は差分を出すだけ。apply は適用する"
+        type: choice
+        options: [plan, apply]
+        default: plan
+      stack:
+        description: "対象のスタック"
+        type: choice
+        options: [envs/dev, shared]
+        default: envs/dev
+
+concurrency:
+  # state ロックが二重 apply を防いではくれるが、片方がロック待ちで
+  # 失敗するだけで分かりにくい。ジョブの段階で直列化しておく。
+  group: infra-${{ inputs.environment }}-${{ inputs.stack }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: us-east-1
+  TERRAFORM_VERSION: "1.15.7"
+
+permissions:
+  contents: read
+
+jobs:
+  terraform:
+    runs-on: ubuntu-latest
+    # GitHub の Environment 保護ルール(必要なら承認者)がここで効く。
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      # ロール名は infra/shared が決めており(edgewatcher-ci-apply-<env>)、
+      # アカウント ID は秘密ではないのでリポジトリ変数に置く。ARN を
+      # まるごと Secrets に入れるより、変数ひとつで済むほうが増えにくい。
+      #
+      # このロールの信頼ポリシーは sub を refs/heads/main に限っている
+      # (infra/shared/main.tf)。したがって main 以外のブランチから
+      # dispatch しても AssumeRole の段階で拒否される。
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ vars.AWS_ACCOUNT_ID }}:role/edgewatcher-ci-apply-${{ inputs.environment }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Secrets Manager からクライアントシークレットを読み、TF_VAR として
+      # 後続ステップに渡す。値が未投入なら何も渡さず、その状態で
+      # google_idp_enabled = true なら cognito-web の precondition が
+      # 明示的なメッセージで止める(空のシークレットで IdP を作らせない)。
+      - name: Load the Google OAuth client secret from Secrets Manager
+        if: inputs.stack == 'envs/dev'
+        env:
+          ENV_NAME: ${{ inputs.environment }}
+        run: |
+          set -euo pipefail
+          secret_id="edgewatcher-${ENV_NAME}-google-oauth-client-secret"
+          if value=$(aws secretsmanager get-secret-value \
+                       --secret-id "$secret_id" \
+                       --query SecretString --output text 2>/dev/null) && [ -n "$value" ] && [ "$value" != "None" ]; then
+            # マスクは環境変数に入れる前に登録する。順序が逆だと、
+            # 直後のステップが失敗して値を出力した場合に素通りする。
+            echo "::add-mask::$value"
+            echo "TF_VAR_google_client_secret=$value" >> "$GITHUB_ENV"
+            echo "Loaded ${secret_id} (value hidden)."
+          else
+            echo "::notice::${secret_id} に値がまだありません。google_idp_enabled = true の場合、この plan/apply は precondition で停止します。"
+          fi
+
+      # backend の設定はコード側に固定してある(infra/*/main.tf)。ここで
+      # -backend-config を渡さないのは、渡す方式だと「どの state に向いて
+      # いるか」がワークフローとコードに分かれて存在することになり、
+      # 片方だけ直したときに気づけないため。
+      - name: Terraform init
+        working-directory: infra/${{ inputs.stack }}
+        run: terraform init -input=false
+
+      - name: Terraform fmt check
+        working-directory: infra/${{ inputs.stack }}
+        run: terraform fmt -check -recursive ../..
+
+      - name: Terraform validate
+        working-directory: infra/${{ inputs.stack }}
+        run: terraform validate
+
+      # plan は常に走らせ、apply はその成果物をそのまま適用する。
+      # apply を独立に走らせると、レビューした差分と適用される差分が
+      # 別物になりうる。
+      - name: Terraform plan
+        working-directory: infra/${{ inputs.stack }}
+        run: terraform plan -input=false -lock-timeout=5m -out=tfplan
+
+      - name: Terraform apply
+        if: inputs.action == 'apply'
+        working-directory: infra/${{ inputs.stack }}
+        run: terraform apply -input=false -lock-timeout=5m tfplan
