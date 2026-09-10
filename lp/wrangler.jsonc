@@ -1,0 +1,12 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "edgewatcher-lp",
+  "compatibility_date": "2026-09-10",
+
+  // Astro が生成する成果物は dist/。public/ は Astro の入力用ディレクトリで、
+  // ここを配信対象に指定すると空(あるいは存在しない)ものを配ろうとして失敗する。
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  }
+}
