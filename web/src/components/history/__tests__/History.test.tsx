@@ -163,6 +163,46 @@ describe('HistoryPage', () => {
     expect(screen.getByTestId('empty-strip')).toHaveTextContent('表示できる画像がありません');
   });
 
+  // 実 API は observations を新しい順(ScanIndexForward:false)で返す。
+  // 画面側は「左 = 古い / 右 = 新しい、シークバー 0% = 古い / 100% = 新しい」
+  // を前提に作られているので、受け取った順をそのまま使うと並びが反転する。
+  // モックは古い順に返すため、モック相当のデータを使うテストでは気づけない。
+  it('renders oldest-first left-to-right even when the API returns newest-first', async () => {
+    const newestFirst = [...mockObservations].reverse();
+    vi.spyOn(apiClient, 'getObservations').mockResolvedValue(newestFirst);
+
+    const queryClient = createTestQueryClient();
+
+    render(
+      <QueryClientProvider client={queryClient}>
+        <MemoryRouter initialEntries={['/devices/dev-001/history']}>
+          <AuthProvider>
+            <Routes>
+              <Route path="/devices/:deviceId/history" element={<HistoryPage />} />
+            </Routes>
+          </AuthProvider>
+        </MemoryRouter>
+      </QueryClientProvider>
+    );
+
+    // コマ列: 左端が最古、右端が最新
+    const oldest = await screen.findByTestId('thumb-0');
+    expect(oldest).toHaveAttribute('aria-label', `撮影時刻 ${mockObservations[0].capturedAt}`);
+    expect(screen.getByTestId('thumb-1')).toHaveAttribute(
+      'aria-label',
+      `撮影時刻 ${mockObservations[1].capturedAt}`
+    );
+
+    // 初期表示は最新の1枚
+    expect(screen.getByTestId('main-history-image')).toHaveAttribute(
+      'src',
+      mockObservations[1].imageUrl
+    );
+
+    // シークバー: 最新は 100% 側
+    expect(screen.getByTestId('scrubber-knob')).toHaveStyle({ left: '100%' });
+  });
+
   it('displays not found error screen when device does not exist', async () => {
     vi.spyOn(apiClient, 'getDevices').mockResolvedValue([]);
 

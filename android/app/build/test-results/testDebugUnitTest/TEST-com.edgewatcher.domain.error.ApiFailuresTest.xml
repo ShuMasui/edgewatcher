@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<testsuite name="com.edgewatcher.domain.error.ApiFailuresTest" tests="14" skipped="0" failures="0" errors="0" timestamp="2026-09-09T21:41:11.705Z" hostname="Shus-MacBook-Pro.local" time="0.002">
+  <properties/>
+  <testcase name="pairing 5xx is retryable" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.001"/>
+  <testcase name="pairing classification does not depend on the body" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="pairing 404 is retryable because the lookup goes through an eventually consistent index" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="token refresh 401 revokes the credentials" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="token refresh only revokes on 401, never on another 4xx" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="an unmapped 4xx on upload is discarded, not retried" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="upload 400 is discarded, never retried" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.001"/>
+  <testcase name="pairing 409 is rejected outright and distinguishes consumed from expired" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="pairing 400 is rejected as invalid" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="upload 5xx is retryable" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="token refresh 5xx does NOT revoke the credentials" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="a network error never revokes the credentials" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="upload 413 is discarded, never retried" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <testcase name="upload 401 and 403 both mean the session expired" classname="com.edgewatcher.domain.error.ApiFailuresTest" time="0.0"/>
+  <system-out><![CDATA[]]></system-out>
+  <system-err><![CDATA[]]></system-err>
+</testsuite>

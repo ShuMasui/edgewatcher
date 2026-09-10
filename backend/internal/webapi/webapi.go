@@ -287,7 +287,9 @@ func (h *Handler) ListObservations(ctx context.Context, req events.APIGatewayV2H
 		return httpx.Response{}, err
 	}
 	// Order comes from the query (ScanIndexForward:false) and is preserved
-	// here — the scrubber depends on newest-first.
+	// here: newest-first. The history screen re-sorts to oldest-first for
+	// display (web/src/hooks/use-observations.ts) rather than depending on
+	// this order, so the contract here is just "newest-first, unpaginated".
 	mapped, err := h.mapper.Observations(ctx, obs, now)
 	if err != nil {
 		return httpx.Response{}, err
