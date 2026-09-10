@@ -41,3 +41,8 @@ backend/dist/
 
 # アプリケーション
 *.apk
+
+# LP (Astro)
+lp/node_modules/
+lp/dist/
+lp/.astro/
