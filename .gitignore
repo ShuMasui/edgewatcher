@@ -46,3 +46,11 @@ backend/dist/
 lp/node_modules/
 lp/dist/
 lp/.astro/
+# Android / Gradle のビルド成果物・IDE 設定(ローカル生成物。コミットしない)
+android/.gradle/
+android/.kotlin/
+android/.idea/
+android/build/
+android/app/build/
+android/local.properties
+*.iml

@@ -1,1 +1,0 @@
--keep,allowobfuscation,allowshrinking class com.edgewatcher.presentation.running.RunningViewModel
