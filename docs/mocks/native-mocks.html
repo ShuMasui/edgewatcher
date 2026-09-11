@@ -361,11 +361,11 @@ const SCENARIOS = [
 
   { group: 'ペアリング', id: 'paired',
     title: '接続しました',
-    note: 'deviceSecret を EncryptedSharedPreferences に保存し、セッショントークンを取得して Foreground Service を開始した直後。',
+    note: 'deviceSecret を EncryptedSharedPreferences に保存し、セッショントークンを取得して Foreground Service を開始した直後。端末名は出さない。POST /device/pair の応答は deviceId と deviceSecret だけで端末名を含まず、他に届く経路もないため、端末は自分の名前を知らない。',
     render: () => scanner({ sheet: sheet(`
       <div style="text-align:center">
         <div class="mark-ok">✓</div>
-        <h4>「玄関」として接続しました</h4>
+        <h4>接続しました</h4>
         <p>観測を開始します。<br>この画面は閉じてかまいません。</p>
         <button class="btn primary">はじめる</button>
       </div>`) }) },
@@ -428,13 +428,13 @@ const SCENARIOS = [
     title: '常駐通知(観測中)',
     note: 'Foreground Service には常駐通知が必須。専用ハードウェアとして常時稼働させる前提のため、通知が出続けることは許容する。画面と同じ情報を出し、端末を持ち上げなくても状態が分かるようにする。なお画面 OFF 中もこの通知は残るが、Foreground Service は CPU のサスペンドを妨げないため、タイマー自体はウェイクロックと AlarmManager で別途担保する(04-native.md §3.0)。',
     render: () => running(),
-    shade: () => notif('観測中', '最終送信 14:32 ・ 5分間隔 ・ 玄関') },
+    shade: () => notif('観測中', '最終送信 14:32 ・ 5分間隔') },
 
   { group: '通知', id: 'notif-offline',
     title: '常駐通知(オフライン)',
     note: '通知からも待機件数が分かるようにする。画面を点けなくても異常に気づける。',
     render: () => running({ status: 'offline' }),
-    shade: () => notif('オフライン', '12件待機中 ・ 最終送信 11:48 ・ 玄関') },
+    shade: () => notif('オフライン', '12件待機中 ・ 最終送信 11:48') },
 ];
 
 // ---------- 切り替え ----------
